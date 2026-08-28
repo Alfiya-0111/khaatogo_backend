@@ -8,7 +8,7 @@ const cors = require("cors");
 const { setupAbsentJob } = require("./markAbsentJob");
 
 // ── Firebase Admin init ──
-const serviceAccount = require("./serviceAccountKey.json");
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 const firebaseApp = admin.initializeApp({
   credential: admin.cert(serviceAccount),
   databaseURL: process.env.FIREBASE_DB_URL,
