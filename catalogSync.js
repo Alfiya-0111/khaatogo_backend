@@ -1,35 +1,39 @@
 // catalogSync.js
-const fetch = require("node-fetch"); // agar node-fetch nahi hai to: npm install node-fetch@2
+const fetch = require("node-fetch");
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v21.0";
 const CATALOG_ID = process.env.META_CATALOG_ID;
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
-// Ek dish ko Meta Catalog me add/update karta hai
 async function upsertCatalogItem(restaurantId, dishId, dish) {
   if (!CATALOG_ID || !ACCESS_TOKEN) {
     console.log("Meta catalog config missing, skipping sync");
     return;
   }
 
-  const retailerId = `${restaurantId}_${dishId}`; // unique ID sab restaurants me
+  const retailerId = `${restaurantId}_${dishId}`;
 
-  const item = {
-    method: "UPDATE",
-    retailer_id: retailerId,
+  const body = {
+    access_token: ACCESS_TOKEN,
     item_type: "PRODUCT_ITEM",
-    data: {
-      availability: dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock",
-      condition: "new",
-      description: dish.description || dish.name,
-      image_url: dish.imageUrl || "https://via.placeholder.com/400",
-      name: dish.name,
-      price: `${Math.round((Number(dish.price) || 0) * 100)} INR`,
-      currency: "INR",
-      brand: "Khaatogo",
-      category: dish.category || "Food",
-      url: `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`,
-    },
+    requests: [
+      {
+        method: "UPDATE",
+        data: {
+          id: retailerId,
+          availability: dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock",
+          condition: "new",
+          description: dish.description || dish.name,
+          image_url: dish.imageUrl || "https://via.placeholder.com/400",
+          name: dish.name,
+          price: `${Math.round((Number(dish.price) || 0) * 100)} INR`,
+          currency: "INR",
+          brand: "Khaatogo",
+          category: dish.category || "Food",
+          url: `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`,
+        },
+      },
+    ],
   };
 
   const res = await fetch(
@@ -37,10 +41,7 @@ async function upsertCatalogItem(restaurantId, dishId, dish) {
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        access_token: ACCESS_TOKEN,
-        requests: [item],
-      }),
+      body: JSON.stringify(body),
     }
   );
 
@@ -53,20 +54,27 @@ async function upsertCatalogItem(restaurantId, dishId, dish) {
   return data;
 }
 
-// Dish delete hone par catalog se bhi hatao
 async function deleteCatalogItem(restaurantId, dishId) {
   if (!CATALOG_ID || !ACCESS_TOKEN) return;
   const retailerId = `${restaurantId}_${dishId}`;
+
+  const body = {
+    access_token: ACCESS_TOKEN,
+    item_type: "PRODUCT_ITEM",
+    requests: [
+      {
+        method: "DELETE",
+        data: { id: retailerId },
+      },
+    ],
+  };
 
   const res = await fetch(
     `https://graph.facebook.com/${GRAPH_VERSION}/${CATALOG_ID}/items_batch`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        access_token: ACCESS_TOKEN,
-             requests: [{ method: "DELETE", retailer_id: retailerId, item_type: "PRODUCT_ITEM" }],
-      }),
+      body: JSON.stringify(body),
     }
   );
   const data = await res.json();
@@ -74,7 +82,6 @@ async function deleteCatalogItem(restaurantId, dishId) {
   else console.log(`Catalog delete OK for ${retailerId}`);
 }
 
-// Server start hote hi RTDB listen karo — har restaurant ke menu me koi bhi change
 function setupCatalogSync(db) {
   const menuRootRef = db.ref("restaurants");
 
