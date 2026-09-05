@@ -19,7 +19,7 @@ const firebaseApp = admin.initializeApp({
 });
 const db = getDatabase(firebaseApp);
 setupAbsentJob(db);
-setupCatalogSync(db);
+
 // ── Razorpay init ──
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -126,6 +126,42 @@ const upload = multer({
 });
 // ── Health check ──
 app.get("/", (req, res) => res.send("Khaatogo payment server is running ✅"));
+// ══════════════════════════════════════════
+// Meta Catalog ke liye CSV feed — Meta khud is URL ko periodically fetch karega
+// ══════════════════════════════════════════
+app.get("/catalog-feed.csv", async (req, res) => {
+  try {
+    const snap = await db.ref("restaurants").once("value");
+    const restaurants = snap.val() || {};
+
+    const rows = [
+      "id,title,description,availability,condition,price,link,image_link,brand"
+    ];
+
+    for (const [restaurantId, rData] of Object.entries(restaurants)) {
+      const menu = rData.menu || {};
+      for (const [dishId, dish] of Object.entries(menu)) {
+        const id = `${restaurantId}_${dishId}`;
+        const title = (dish.name || "").replace(/"/g, "'");
+        const description = (dish.description || dish.name || "").replace(/"/g, "'").replace(/\n/g, " ");
+        const availability = dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock";
+        const price = `${(Number(dish.price) || 0).toFixed(2)} INR`;
+        const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
+        const image = dish.imageUrl || "https://via.placeholder.com/400";
+
+        rows.push(
+          [id, `"${title}"`, `"${description}"`, availability, "new", price, link, image, "Khaatogo"].join(",")
+        );
+      }
+    }
+
+    res.set("Content-Type", "text/csv");
+    res.send(rows.join("\n"));
+  } catch (e) {
+    console.error("Catalog feed error:", e);
+    res.status(500).send("Error generating feed");
+  }
+});
 
 // ══════════════════════════════════════════
 // RESTAURANT ka Linked Account banao (bank onboarding — step 1)
