@@ -26,7 +26,7 @@ async function upsertCatalogItem(restaurantId, dishId, dish) {
           description: dish.description || dish.name,
           image_url: dish.imageUrl || "https://via.placeholder.com/400",
           name: dish.name,
-          price: `${Math.round((Number(dish.price) || 0) * 100)} INR`,
+         price: `${(Number(dish.price) || 0).toFixed(2)} INR`,
           currency: "INR",
           brand: "Khaatogo",
           category: dish.category || "Food",
