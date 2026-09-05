@@ -42,6 +42,30 @@ async function upsertCatalogItem(restaurantId, dishId, dish, restaurantGeo) {
     ],
   };
 
+  const res = await fetch(
+    `https://graph.facebook.com/${GRAPH_VERSION}/${CATALOG_ID}/items_batch`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+
+  const data = await res.json();
+  if (data.error) {
+    console.error(`Catalog sync FAILED for ${retailerId}:`, data.error.message);
+    return data;
+  }
+
+  console.log(`Catalog sync ACCEPTED for ${retailerId}, handle: ${data.handles?.[0]}`);
+
+  if (data.handles?.[0]) {
+    setTimeout(() => checkBatchStatus(data.handles[0], retailerId), 5000);
+  }
+
+  return data;
+}
+
 async function checkBatchStatus(handle, retailerId) {
   try {
     const res = await fetch(

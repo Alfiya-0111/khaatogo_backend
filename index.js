@@ -150,9 +150,9 @@ app.get("/catalog-feed.csv", async (req, res) => {
     for (const [restaurantId, rData] of Object.entries(restaurants)) {
       const menu = rData.menu || {};
 
-      const lat = rData.location?.lat ?? rData.lat ?? "";
-      const lng = rData.location?.lng ?? rData.lng ?? "";
-      const radiusKm = rData.deliveryRadiusKm ?? 5;
+           const lat = rData.attendanceGeofence?.lat ?? "";
+      const lng = rData.attendanceGeofence?.lng ?? "";
+      const radiusKm = 5;
 
       for (const [dishId, dish] of Object.entries(menu)) {
         const id = `${restaurantId}_${dishId}`;
