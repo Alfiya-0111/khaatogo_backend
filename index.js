@@ -271,6 +271,48 @@ app.post("/create-restaurant-catalog", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+const { attachCatalogToWaba, enableCommerceSettings } = require("./whatsappCatalog"); // ★ NEW
+
+// ══════════════════════════════════════════
+// ★ NEW: Restaurant ka catalog WhatsApp Business Account se attach karo
+// ══════════════════════════════════════════
+app.post("/attach-whatsapp-catalog", async (req, res) => {
+  try {
+    const { restaurantId, wabaId, phoneNumberId } = req.body;
+
+    if (!restaurantId || !wabaId) {
+      return res.status(400).json({ error: "restaurantId aur wabaId required" });
+    }
+
+    const catalogSnap = await db.ref(`restaurants/${restaurantId}/metaCatalog`).once("value");
+    const { catalogId } = catalogSnap.val() || {};
+
+    if (!catalogId) {
+      return res.status(400).json({
+        error: "Pehle catalog banao — /create-restaurant-catalog call karo",
+      });
+    }
+
+    const result = await attachCatalogToWaba(wabaId, catalogId);
+
+    let commerceResult = null;
+    if (phoneNumberId) {
+      commerceResult = await enableCommerceSettings(phoneNumberId);
+    }
+
+    await db.ref(`restaurants/${restaurantId}/whatsapp`).update({
+      wabaId,
+      phoneNumberId: phoneNumberId || null,
+      catalogAttachedAt: Date.now(),
+      catalogAttached: true,
+    });
+
+    res.json({ status: "attached", result, commerceResult });
+  } catch (e) {
+    console.error("Attach WhatsApp catalog error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 // ══════════════════════════════════════════
 // RESTAURANT ka Linked Account banao (bank onboarding — step 1)
 // ══════════════════════════════════════════
