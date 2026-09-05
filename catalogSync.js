@@ -48,10 +48,28 @@ async function upsertCatalogItem(restaurantId, dishId, dish) {
   const data = await res.json();
   if (data.error) {
     console.error(`Catalog sync FAILED for ${retailerId}:`, data.error.message);
-  } else {
-    console.log(`Catalog sync OK for ${retailerId}`);
+    return data;
   }
+
+  console.log(`Catalog sync ACCEPTED for ${retailerId}, handle: ${data.handles?.[0]}`);
+
+  if (data.handles?.[0]) {
+    setTimeout(() => checkBatchStatus(data.handles[0], retailerId), 5000);
+  }
+
   return data;
+}
+
+async function checkBatchStatus(handle, retailerId) {
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${CATALOG_ID}/check_batch_request_status?handle=${handle}&access_token=${ACCESS_TOKEN}`
+    );
+    const data = await res.json();
+    console.log(`Batch status for ${retailerId}:`, JSON.stringify(data));
+  } catch (e) {
+    console.error(`Batch status check failed for ${retailerId}:`, e.message);
+  }
 }
 
 async function deleteCatalogItem(restaurantId, dishId) {
