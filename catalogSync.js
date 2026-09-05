@@ -17,17 +17,18 @@ async function upsertCatalogItem(restaurantId, dishId, dish) {
   const item = {
     method: "UPDATE",
     retailer_id: retailerId,
+    item_type: "PRODUCT_ITEM",
     data: {
       availability: dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock",
       condition: "new",
       description: dish.description || dish.name,
       image_url: dish.imageUrl || "https://via.placeholder.com/400",
       name: dish.name,
-      price: `${Math.round((Number(dish.price) || 0) * 100)} INR`, // paise me, INR currency
+      price: `${Math.round((Number(dish.price) || 0) * 100)} INR`,
       currency: "INR",
       brand: "Khaatogo",
       category: dish.category || "Food",
-      url: `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`, // dummy product-page link, required field
+      url: `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`,
     },
   };
 
@@ -64,7 +65,7 @@ async function deleteCatalogItem(restaurantId, dishId) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         access_token: ACCESS_TOKEN,
-        requests: [{ method: "DELETE", retailer_id: retailerId }],
+             requests: [{ method: "DELETE", retailer_id: retailerId, item_type: "PRODUCT_ITEM" }],
       }),
     }
   );
