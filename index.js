@@ -134,23 +134,43 @@ app.get("/catalog-feed.csv", async (req, res) => {
     const snap = await db.ref("restaurants").once("value");
     const restaurants = snap.val() || {};
 
-    const rows = [
-      "id,title,description,availability,condition,price,link,image_link,brand"
+    const csvField = (val) =>
+      `"${String(val ?? "").replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
+
+    const HEADER = [
+      "id", "title", "description", "availability", "condition", "price",
+      "link", "image_link", "brand",
+      "availability_circle_origin.latitude",
+      "availability_circle_origin.longitude",
+      "availability_circle_radius",
+      "availability_circle_radius_unit",
     ];
+    const rows = [HEADER.join(",")];
 
     for (const [restaurantId, rData] of Object.entries(restaurants)) {
       const menu = rData.menu || {};
+
+      const lat = rData.location?.lat ?? rData.lat ?? "";
+      const lng = rData.location?.lng ?? rData.lng ?? "";
+      const radiusKm = rData.deliveryRadiusKm ?? 5;
+
       for (const [dishId, dish] of Object.entries(menu)) {
         const id = `${restaurantId}_${dishId}`;
-        const title = (dish.name || "").replace(/"/g, "'");
-        const description = (dish.description || dish.name || "").replace(/"/g, "'").replace(/\n/g, " ");
-        const availability = dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock";
+        const title = dish.name || "";
+        const description = dish.description || dish.name || "";
+        const availability =
+          dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock";
         const price = `${(Number(dish.price) || 0).toFixed(2)} INR`;
         const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
         const image = dish.imageUrl || "https://via.placeholder.com/400";
 
         rows.push(
-          [id, `"${title}"`, `"${description}"`, availability, "new", price, link, image, "Khaatogo"].join(",")
+          [
+            csvField(id), csvField(title), csvField(description),
+            csvField(availability), csvField("new"), csvField(price),
+            csvField(link), csvField(image), csvField("Khaatogo"),
+            csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
+          ].join(",")
         );
       }
     }

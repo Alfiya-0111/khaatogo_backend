@@ -5,7 +5,7 @@ const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v21.0";
 const CATALOG_ID = process.env.META_CATALOG_ID;
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 
-async function upsertCatalogItem(restaurantId, dishId, dish) {
+async function upsertCatalogItem(restaurantId, dishId, dish, restaurantGeo) {
   if (!CATALOG_ID || !ACCESS_TOKEN) {
     console.log("Meta catalog config missing, skipping sync");
     return;
@@ -26,39 +26,21 @@ async function upsertCatalogItem(restaurantId, dishId, dish) {
           description: dish.description || dish.name,
           image_url: dish.imageUrl || "https://via.placeholder.com/400",
           name: dish.name,
-         price: `${(Number(dish.price) || 0).toFixed(2)} INR`,
+          price: `${(Number(dish.price) || 0).toFixed(2)} INR`,
           currency: "INR",
           brand: "Khaatogo",
           category: dish.category || "Food",
           url: `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`,
+          availability_circle_origin: {
+            latitude: restaurantGeo?.lat,
+            longitude: restaurantGeo?.lng,
+          },
+          availability_circle_radius: 5,
+          availability_circle_radius_unit: "km",
         },
       },
     ],
   };
-
-  const res = await fetch(
-    `https://graph.facebook.com/${GRAPH_VERSION}/${CATALOG_ID}/items_batch`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }
-  );
-
-  const data = await res.json();
-  if (data.error) {
-    console.error(`Catalog sync FAILED for ${retailerId}:`, data.error.message);
-    return data;
-  }
-
-  console.log(`Catalog sync ACCEPTED for ${retailerId}, handle: ${data.handles?.[0]}`);
-
-  if (data.handles?.[0]) {
-    setTimeout(() => checkBatchStatus(data.handles[0], retailerId), 5000);
-  }
-
-  return data;
-}
 
 async function checkBatchStatus(handle, retailerId) {
   try {
@@ -109,19 +91,29 @@ function setupCatalogSync(db) {
     const menuRef = db.ref(`restaurants/${restaurantId}/menu`);
     let initialLoadDone = false;
 
+    // ★ NEW: restaurant ka geofence lat/lng nikalo, locality fields ke liye
+    const getRestaurantGeo = async () => {
+      const geoSnap = await db.ref(`restaurants/${restaurantId}/attendanceGeofence`).once("value");
+      return geoSnap.val() || {};
+    };
+
     // ★ Pehli baar poora menu ek saath load karo (silently, Meta ko kuch mat bhejo)
     menuRef.once("value", () => {
       initialLoadDone = true;
     });
 
     // ★ Sirf ab ke baad add hone wale naye dishes sync honge
-    menuRef.on("child_added", (snap) => {
+    menuRef.on("child_added", async (snap) => {
       if (!initialLoadDone) return; // purane items skip karo
-      upsertCatalogItem(restaurantId, snap.key, snap.val());
+      const geo = await getRestaurantGeo();
+      upsertCatalogItem(restaurantId, snap.key, snap.val(), geo);
     });
 
     // ★ Edit hamesha sync hoga (ye zaroori hai)
-    menuRef.on("child_changed", (snap) => upsertCatalogItem(restaurantId, snap.key, snap.val()));
+    menuRef.on("child_changed", async (snap) => {
+      const geo = await getRestaurantGeo();
+      upsertCatalogItem(restaurantId, snap.key, snap.val(), geo);
+    });
     menuRef.on("child_removed", (snap) => deleteCatalogItem(restaurantId, snap.key));
   });
 
