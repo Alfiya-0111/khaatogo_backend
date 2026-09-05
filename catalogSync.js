@@ -102,12 +102,25 @@ async function deleteCatalogItem(restaurantId, dishId) {
 
 function setupCatalogSync(db) {
   const menuRootRef = db.ref("restaurants");
+  const serverStartTime = Date.now();
 
   menuRootRef.on("child_added", (restaurantSnap) => {
     const restaurantId = restaurantSnap.key;
     const menuRef = db.ref(`restaurants/${restaurantId}/menu`);
+    let initialLoadDone = false;
 
-    menuRef.on("child_added", (snap) => upsertCatalogItem(restaurantId, snap.key, snap.val()));
+    // ★ Pehli baar poora menu ek saath load karo (silently, Meta ko kuch mat bhejo)
+    menuRef.once("value", () => {
+      initialLoadDone = true;
+    });
+
+    // ★ Sirf ab ke baad add hone wale naye dishes sync honge
+    menuRef.on("child_added", (snap) => {
+      if (!initialLoadDone) return; // purane items skip karo
+      upsertCatalogItem(restaurantId, snap.key, snap.val());
+    });
+
+    // ★ Edit hamesha sync hoga (ye zaroori hai)
     menuRef.on("child_changed", (snap) => upsertCatalogItem(restaurantId, snap.key, snap.val()));
     menuRef.on("child_removed", (snap) => deleteCatalogItem(restaurantId, snap.key));
   });
