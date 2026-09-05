@@ -6,6 +6,7 @@ const admin = require("firebase-admin");
 const { getDatabase } = require("firebase-admin/database");
 const cors = require("cors");
 const { setupAbsentJob } = require("./markAbsentJob");
+const { setupCatalogSync } = require("./catalogSync");
 
 // ── Firebase Admin init ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -15,6 +16,7 @@ const firebaseApp = admin.initializeApp({
 });
 const db = getDatabase(firebaseApp);
 setupAbsentJob(db);
+setupCatalogSync(db);
 // ── Razorpay init ──
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -89,7 +91,15 @@ app.post(
     }
   }
 );
-
+app.post("/webhook/kronos", async (req, res) => {
+  try {
+    console.log("Kronos webhook payload:", JSON.stringify(req.body, null, 2));
+    res.json({ status: "received" });
+  } catch (e) {
+    console.error("Kronos webhook error:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
 // ══════════════════════════════════════════
 // ★ FIX: JSON parser yahan, saare baaki routes ke UPAR — 
 // warna neeche wale routes mein req.body undefined milega
