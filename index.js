@@ -5,6 +5,9 @@ const crypto = require("crypto");
 const admin = require("firebase-admin");
 const { getDatabase } = require("firebase-admin/database");
 const cors = require("cors");
+const multer = require("multer");        // ★ NEW
+const axios = require("axios");          // ★ NEW
+const FormData = require("form-data");   
 const { setupAbsentJob } = require("./markAbsentJob");
 const { setupCatalogSync } = require("./catalogSync");
 
@@ -70,6 +73,16 @@ app.post(
           });
           console.log(`✅ Payment confirmed for order ${orderId}`);
         }
+              if (event.event === "payment.failed") {
+        const payment = event.payload.payment.entity;
+        const { restaurantId, orderId } = payment.notes || {};
+        if (restaurantId && orderId) {
+          await db.ref(`orders/${restaurantId}/${orderId}`).update({
+            paymentStatus: "failed",
+            failureReason: payment.error_description || "Payment failed",
+          });
+        }
+      }
       }
 
       // 2) Restaurant ka linked account activate hone par flag update karo
@@ -105,7 +118,12 @@ app.post("/webhook/kronos", async (req, res) => {
 // warna neeche wale routes mein req.body undefined milega
 // ══════════════════════════════════════════
 app.use(express.json());
-
+// ★ NEW: Multer setup — file uploads memory mein handle karega
+// ══════════════════════════════════════════
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+});
 // ── Health check ──
 app.get("/", (req, res) => res.send("Khaatogo payment server is running ✅"));
 
@@ -139,7 +157,7 @@ app.post("/create-linked-account", async (req, res) => {
       return res.status(400).json({ error: "PAN number ka format galat hai (example: ABCDE1234F)" });
     }
 
-    const account = await razorpay.accounts.create({
+      const account = await razorpay.accounts.create({
       email,
       phone: cleanPhone,
       type: "route",
@@ -159,21 +177,32 @@ app.post("/create-linked-account", async (req, res) => {
           },
         },
       },
-          legal_info: {
+      legal_info: {
         pan: cleanPan,
       },
-      // ★ IMPORTANT: notes mein restaurantId dalna zaroori hai,
-      // taaki webhook mein "account.activated" event pe pata chal sake ye kis restaurant ka account hai
       notes: { restaurantId },
     });
 
+    // ★ NEW: Route product explicitly request karo — bina iske account activate nahi hoga
+    let productId = null;
+    try {
+      const productRes = await razorpay.products.requestProductConfiguration(account.id, {
+        product_name: "route",
+        tnc_accepted: true,
+      });
+      productId = productRes.id;
+    } catch (prodErr) {
+      console.error("Route product request failed:", prodErr.error || prodErr.message);
+    }
+
     await db.ref(`restaurants/${restaurantId}/payment`).update({
       razorpayLinkedAccountId: account.id,
-      razorpayAccountStatus: "created", // "created" -> "activated" (webhook se update hoga)
+      razorpayProductId: productId, // ★ NEW: KYC document upload ke liye chahiye
+      razorpayAccountStatus: "created",
       razorpayCreatedAt: Date.now(),
     });
 
-    res.json({ accountId: account.id, status: account.status });
+    res.json({ accountId: account.id, status: account.status, productId });
   } catch (e) {
     console.error("Linked account creation error:", e.error || e.message);
     res.status(500).json({ error: e.error?.description || e.message });
@@ -226,7 +255,74 @@ app.post("/link-bank-account", async (req, res) => {
     res.status(500).json({ error: e.error?.description || e.message });
   }
 });
+// ══════════════════════════════════════════
+// ★ NEW: KYC documents upload karo (PAN + bank proof) — Route activation ke liye zaroori
+// ══════════════════════════════════════════
+app.post(
+  "/upload-kyc-document",
+  upload.fields([
+    { name: "businessProof", maxCount: 1 },
+    { name: "bankProof", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const { restaurantId } = req.body;
+      if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
+      const paySnap = await db.ref(`restaurants/${restaurantId}/payment`).once("value");
+      const { razorpayLinkedAccountId, razorpayProductId } = paySnap.val() || {};
+
+      if (!razorpayLinkedAccountId || !razorpayProductId) {
+        return res.status(400).json({ error: "Pehle linked account bano (create-linked-account call karo)" });
+      }
+
+      const authCreds = {
+        username: process.env.RAZORPAY_KEY_ID,
+        password: process.env.RAZORPAY_KEY_SECRET,
+      };
+
+      const uploadedDocs = {};
+
+      if (req.files?.businessProof?.[0]) {
+        const file = req.files.businessProof[0];
+        const form = new FormData();
+        form.append("file", file.buffer, { filename: file.originalname, contentType: file.mimetype });
+        form.append("document_type", "business_proof_url");
+
+        const docRes = await axios.post(
+          `https://api.razorpay.com/v2/accounts/${razorpayLinkedAccountId}/stakeholders/documents`,
+          form,
+          { auth: authCreds, headers: form.getHeaders() }
+        );
+        uploadedDocs.businessProof = docRes.data;
+      }
+
+      if (req.files?.bankProof?.[0]) {
+        const file = req.files.bankProof[0];
+        const form = new FormData();
+        form.append("file", file.buffer, { filename: file.originalname, contentType: file.mimetype });
+        form.append("document_type", "bank_proof_url");
+
+        const docRes = await axios.post(
+          `https://api.razorpay.com/v2/accounts/${razorpayLinkedAccountId}/products/${razorpayProductId}/documents`,
+          form,
+          { auth: authCreds, headers: form.getHeaders() }
+        );
+        uploadedDocs.bankProof = docRes.data;
+      }
+
+      await db.ref(`restaurants/${restaurantId}/payment`).update({
+        kycDocsUploadedAt: Date.now(),
+        kycDocsStatus: "submitted",
+      });
+
+      res.json({ status: "documents_submitted", uploadedDocs });
+    } catch (e) {
+      console.error("KYC doc upload error:", e.response?.data || e.message);
+      res.status(500).json({ error: e.response?.data?.error?.description || e.message });
+    }
+  }
+);
 // ══════════════════════════════════════════
 // ORDER banao — restaurant ko payment split karke (Route transfers)
 // ══════════════════════════════════════════
