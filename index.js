@@ -182,7 +182,95 @@ app.get("/catalog-feed.csv", async (req, res) => {
     res.status(500).send("Error generating feed");
   }
 });
+app.get("/catalog-feed/:restaurantId.csv", async (req, res) => {
+  try {
+    const { restaurantId } = req.params;
+    const rSnap = await db.ref(`restaurants/${restaurantId}`).once("value");
+    const rData = rSnap.val();
 
+    if (!rData) {
+      return res.status(404).send("Restaurant not found");
+    }
+
+    const csvField = (val) =>
+      `"${String(val ?? "").replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
+
+    const HEADER = [
+      "id", "title", "description", "availability", "condition", "price",
+      "link", "image_link", "brand",
+      "availability_circle_origin.latitude",
+      "availability_circle_origin.longitude",
+      "availability_circle_radius",
+      "availability_circle_radius_unit",
+    ];
+    const rows = [HEADER.join(",")];
+
+    const menu = rData.menu || {};
+    const lat = rData.attendanceGeofence?.lat ?? "";
+    const lng = rData.attendanceGeofence?.lng ?? "";
+    const radiusKm = 5;
+
+    for (const [dishId, dish] of Object.entries(menu)) {
+      const id = `${restaurantId}_${dishId}`;
+      const title = dish.name || "";
+      const description = dish.description || dish.name || "";
+      const availability =
+        dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock";
+      const price = `${(Number(dish.price) || 0).toFixed(2)} INR`;
+      const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
+      const image = dish.imageUrl || "https://via.placeholder.com/400";
+
+      rows.push(
+        [
+          csvField(id), csvField(title), csvField(description),
+          csvField(availability), csvField("new"), csvField(price),
+          csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
+          csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
+        ].join(",")
+      );
+    }
+
+    res.set("Content-Type", "text/csv");
+    res.send(rows.join("\n"));
+  } catch (e) {
+    console.error("Per-restaurant catalog feed error:", e);
+    res.status(500).send("Error generating feed");
+  }
+});
+const { createRestaurantCatalog } = require("./createRestaurantCatalog");
+
+// ══════════════════════════════════════════
+// ★ NEW: Restaurant ke liye Meta catalog + feed + sharing automate karo
+// ══════════════════════════════════════════
+app.post("/create-restaurant-catalog", async (req, res) => {
+  try {
+    const { restaurantId } = req.body;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const rSnap = await db.ref(`restaurants/${restaurantId}`).once("value");
+    const rData = rSnap.val();
+    if (!rData) return res.status(404).json({ error: "Restaurant not found" });
+
+    if (!rData.metaBusinessId) {
+      return res.status(400).json({
+        error: "Restaurant ne apna Meta Business Manager ID nahi diya hai — Settings mein set karwao",
+      });
+    }
+
+    const result = await createRestaurantCatalog(restaurantId, rData.name, rData.metaBusinessId);
+
+    await db.ref(`restaurants/${restaurantId}/metaCatalog`).update({
+      catalogId: result.catalogId,
+      feedId: result.feedId,
+      createdAt: Date.now(),
+    });
+
+    res.json({ status: "created", ...result });
+  } catch (e) {
+    console.error("Create restaurant catalog error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 // ══════════════════════════════════════════
 // RESTAURANT ka Linked Account banao (bank onboarding — step 1)
 // ══════════════════════════════════════════
