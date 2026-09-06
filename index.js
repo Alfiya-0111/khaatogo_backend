@@ -60,10 +60,9 @@ app.post(
       const event = JSON.parse(req.body.toString());
 
       // 1) Payment successful hone par order confirm karo
-      if (event.event === "payment.captured") {
+          if (event.event === "payment.captured") {
         const payment = event.payload.payment.entity;
         const { restaurantId, orderId } = payment.notes || {};
-
         if (restaurantId && orderId) {
           await db.ref(`orders/${restaurantId}/${orderId}`).update({
             paymentStatus: "paid_online",
@@ -73,7 +72,9 @@ app.post(
           });
           console.log(`✅ Payment confirmed for order ${orderId}`);
         }
-              if (event.event === "payment.failed") {
+      }
+
+      if (event.event === "payment.failed") {
         const payment = event.payload.payment.entity;
         const { restaurantId, orderId } = payment.notes || {};
         if (restaurantId && orderId) {
@@ -83,6 +84,15 @@ app.post(
           });
         }
       }
+
+      if (event.event === "payment_link.paid") {
+        const paymentLink = event.payload.payment_link.entity;
+        const { restaurantId, orderId } = paymentLink.notes || {};
+        if (restaurantId && orderId) {
+          const updates = { status: "confirmed", paymentStatus: "paid_online", paidAt: Date.now() };
+          await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update(updates);
+          await db.ref(`orders/${restaurantId}/${orderId}`).update(updates);
+        }
       }
 
       // 2) Restaurant ka linked account activate hone par flag update karo
@@ -237,6 +247,46 @@ app.get("/catalog-feed/:restaurantId.csv", async (req, res) => {
     res.status(500).send("Error generating feed");
   }
 });
+const { handleIncomingMessage } = require("./whatsappOrderHandler"); // ★ NEW
+
+const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN; // ★ NEW
+
+// ══════════════════════════════════════════
+// ★ NEW: Meta webhook verification (ek baar setup ke waqt call hoga)
+// ══════════════════════════════════════════
+app.get("/webhook/whatsapp", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === WHATSAPP_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  res.sendStatus(403);
+});
+
+// ══════════════════════════════════════════
+// ★ NEW: Customer ke WhatsApp messages/orders yahan aate hain
+// ══════════════════════════════════════════
+app.post("/webhook/whatsapp", async (req, res) => {
+  res.sendStatus(200); // Meta ko turant acknowledge karo
+  try {
+    const value = req.body.entry?.[0]?.changes?.[0]?.value;
+    const phoneNumberId = value?.metadata?.phone_number_id;
+    const message = value?.messages?.[0];
+    if (!message || !phoneNumberId) return;
+
+    const mapSnap = await db.ref(`phoneNumberIdToRestaurant/${phoneNumberId}`).once("value");
+    const restaurantId = mapSnap.val();
+    if (!restaurantId) {
+      console.log("Unknown phoneNumberId:", phoneNumberId);
+      return;
+    }
+
+    await handleIncomingMessage(db, razorpay, message, phoneNumberId, restaurantId);
+  } catch (e) {
+    console.error("WhatsApp webhook error:", e);
+  }
+});
 const { createRestaurantCatalog } = require("./createRestaurantCatalog");
 
 // ══════════════════════════════════════════
@@ -306,7 +356,9 @@ app.post("/attach-whatsapp-catalog", async (req, res) => {
       catalogAttachedAt: Date.now(),
       catalogAttached: true,
     });
-
+if (phoneNumberId) {
+  await db.ref(`phoneNumberIdToRestaurant/${phoneNumberId}`).set(restaurantId); // ★ NEW
+}
     res.json({ status: "attached", result, commerceResult });
   } catch (e) {
     console.error("Attach WhatsApp catalog error:", e.message);
