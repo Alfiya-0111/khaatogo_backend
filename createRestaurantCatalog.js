@@ -27,6 +27,7 @@ async function createRestaurantCatalog(restaurantId, restaurantName, partnerBusi
   );
   const catalogData = await catalogRes.json();
   if (catalogData.error) {
+    console.error("FULL Meta error:", JSON.stringify(catalogData.error, null, 2)); // ★ full detail
     throw new Error(`Catalog create failed: ${catalogData.error.message}`);
   }
   const catalogId = catalogData.id;
