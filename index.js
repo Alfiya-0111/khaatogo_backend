@@ -9,7 +9,7 @@ const multer = require("multer");        // ★ NEW
 const axios = require("axios");          // ★ NEW
 const FormData = require("form-data");   
 const { setupAbsentJob } = require("./markAbsentJob");
-const { setupCatalogSync } = require("./catalogSync");
+const { setupCatalogSync, upsertCatalogItem } = require("./catalogSync");
 
 // ── Firebase Admin init ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -320,6 +320,45 @@ app.post("/create-restaurant-catalog", async (req, res) => {
     res.json({ status: "created", ...result });
   } catch (e) {
     console.error("Create restaurant catalog error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+app.post("/test-attach-existing-catalog", async (req, res) => {
+  try {
+    const { restaurantId } = req.body;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    await db.ref(`restaurants/${restaurantId}/metaCatalog`).update({
+      catalogId: process.env.META_CATALOG_ID,
+      attachedManually: true,
+      createdAt: Date.now(),
+    });
+
+    res.json({ status: "attached", catalogId: process.env.META_CATALOG_ID });
+  } catch (e) {
+    console.error("Test attach error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/test-catalog-sync", async (req, res) => {
+  try {
+    const { restaurantId, dishId } = req.body;
+    if (!restaurantId || !dishId) {
+      return res.status(400).json({ error: "restaurantId aur dishId required" });
+    }
+
+    const dishSnap = await db.ref(`restaurants/${restaurantId}/menu/${dishId}`).once("value");
+    const dish = dishSnap.val();
+    if (!dish) return res.status(404).json({ error: "Dish not found" });
+
+    const geoSnap = await db.ref(`restaurants/${restaurantId}/attendanceGeofence`).once("value");
+    const geo = geoSnap.val() || {};
+
+    const result = await upsertCatalogItem(db, restaurantId, dishId, dish, geo);
+    res.json({ status: "sync_attempted", result });
+  } catch (e) {
+    console.error("Test sync error:", e.message);
     res.status(500).json({ error: e.message });
   }
 });

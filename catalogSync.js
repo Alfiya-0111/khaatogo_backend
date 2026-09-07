@@ -103,4 +103,4 @@ function setupCatalogSync(db) {
   console.log("✅ Meta catalog sync listener started");
 }
 
-module.exports = { setupCatalogSync };
+module.exports = { setupCatalogSync, upsertCatalogItem };
