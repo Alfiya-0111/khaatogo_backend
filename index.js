@@ -294,20 +294,22 @@ const { createRestaurantCatalog } = require("./createRestaurantCatalog");
 // ══════════════════════════════════════════
 app.post("/create-restaurant-catalog", async (req, res) => {
   try {
-    const { restaurantId } = req.body;
+    const { restaurantId, metaBusinessId } = req.body;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const rSnap = await db.ref(`restaurants/${restaurantId}`).once("value");
     const rData = rSnap.val();
     if (!rData) return res.status(404).json({ error: "Restaurant not found" });
 
-    if (!rData.metaBusinessId) {
+    const finalMetaBusinessId = metaBusinessId || rData.metaBusinessId;
+
+    if (!finalMetaBusinessId) {
       return res.status(400).json({
         error: "Restaurant ne apna Meta Business Manager ID nahi diya hai — Settings mein set karwao",
       });
     }
 
-    const result = await createRestaurantCatalog(restaurantId, rData.name, rData.metaBusinessId);
+    const result = await createRestaurantCatalog(restaurantId, rData.name, finalMetaBusinessId);
 
     await db.ref(`restaurants/${restaurantId}/metaCatalog`).update({
       catalogId: result.catalogId,
