@@ -32,8 +32,9 @@ const app = express();
 app.use(cors({
   origin: [
     "https://khaatogo.com",
+    "https://www.khaatogo.com",   // ★ NEW — www wala origin bhi add karo
     "http://localhost:3000",
-    "http://localhost:5173",   // ← apna actual frontend port yahan daalo
+    "http://localhost:5173",
   ],
 }));
 
