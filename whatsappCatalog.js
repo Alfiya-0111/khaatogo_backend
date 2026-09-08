@@ -44,5 +44,23 @@ async function enableCommerceSettings(phoneNumberId) {
   }
   return data;
 }
+// ── App ko WABA se subscribe karo — bina iske messages webhook kabhi nahi aayega ──
+async function subscribeAppToWaba(wabaId) {
+  const res = await fetch(
+    `https://graph.facebook.com/${GRAPH_VERSION}/${wabaId}/subscribed_apps`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ access_token: ACCESS_TOKEN }),
+    }
+  );
+  const data = await res.json();
+  if (data.error) {
+    console.error("Subscribe app to WABA failed:", data.error.message);
+  } else {
+    console.log(`✅ App subscribed to WABA ${wabaId}`);
+  }
+  return data;
+}
 
-module.exports = { attachCatalogToWaba, enableCommerceSettings };
+module.exports = { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba };

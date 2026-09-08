@@ -362,7 +362,7 @@ app.post("/test-catalog-sync", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-const { attachCatalogToWaba, enableCommerceSettings } = require("./whatsappCatalog"); // ★ NEW
+const { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba } = require("./whatsappCatalog");
 
 // ══════════════════════════════════════════
 // ★ NEW: Restaurant ka catalog WhatsApp Business Account se attach karo
@@ -386,6 +386,9 @@ app.post("/attach-whatsapp-catalog", async (req, res) => {
 
     const result = await attachCatalogToWaba(wabaId, catalogId);
 
+    // ★ app ko WABA se subscribe karo taaki messages webhook aaye
+    const subscribeResult = await subscribeAppToWaba(wabaId);
+
     let commerceResult = null;
     if (phoneNumberId) {
       commerceResult = await enableCommerceSettings(phoneNumberId);
@@ -397,10 +400,13 @@ app.post("/attach-whatsapp-catalog", async (req, res) => {
       catalogAttachedAt: Date.now(),
       catalogAttached: true,
     });
-if (phoneNumberId) {
-  await db.ref(`phoneNumberIdToRestaurant/${phoneNumberId}`).set(restaurantId); // ★ NEW
-}
-    res.json({ status: "attached", result, commerceResult });
+
+    if (phoneNumberId) {
+      await db.ref(`phoneNumberIdToRestaurant/${phoneNumberId}`).set(restaurantId);
+    }
+
+    // ★ SIRF EK res.json() — sabse aakhir mein, sab kuch complete hone ke baad
+    res.json({ status: "attached", result, commerceResult, subscribeResult });
   } catch (e) {
     console.error("Attach WhatsApp catalog error:", e.message);
     res.status(500).json({ error: e.message });
