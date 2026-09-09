@@ -95,7 +95,36 @@ app.post(
           await db.ref(`orders/${restaurantId}/${orderId}`).update(updates);
         }
       }
+if (event.event === "qr_code.credited") {
+  const payment = event.payload.payment.entity;
+  const qrCode = event.payload.qr_code.entity;
+  const { restaurantId, orderId } = qrCode.notes || {};
+  if (restaurantId && orderId) {
+    await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update({
+      status: "confirmed", paymentStatus: "paid_online",
+      razorpayPaymentId: payment.id, paidAt: Date.now(),
+    });
+    await db.ref(`orders/${restaurantId}/${orderId}`).update({
+      status: "confirmed", paymentStatus: "paid_online",
+      razorpayPaymentId: payment.id, paidAt: Date.now(),
+    });
 
+    // restaurant ko uska share transfer karo (Route)
+    try {
+      const restSnap = await db.ref(`restaurants/${restaurantId}/payment`).once("value");
+      const { razorpayLinkedAccountId } = restSnap.val() || {};
+      if (razorpayLinkedAccountId) {
+        const commissionPercent = Number(process.env.PLATFORM_COMMISSION_PERCENT) || 2;
+        const commission = Math.round(payment.amount * (commissionPercent / 100));
+        await razorpay.payments.transfer(payment.id, {
+          transfers: [{ account: razorpayLinkedAccountId, amount: payment.amount - commission, currency: "INR", notes: { orderId } }],
+        });
+      }
+    } catch (e) {
+      console.error("QR transfer failed:", e.error || e.message);
+    }
+  }
+}
       // 2) Restaurant ka linked account activate hone par flag update karo
       if (event.event === "account.activated") {
         const account = event.payload.account.entity;
@@ -148,9 +177,9 @@ app.get("/catalog-feed.csv", async (req, res) => {
     const csvField = (val) =>
       `"${String(val ?? "").replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
 
-  const HEADER = [
+const HEADER = [
   "id", "title", "description", "availability", "condition", "price",
-  "link", "image_link", "brand", "category", // ★ "category" add kiya
+  "link", "image_link", "brand", "category", // ★ NEW
   "availability_circle_origin.latitude",
   "availability_circle_origin.longitude",
   "availability_circle_radius",
@@ -175,11 +204,11 @@ app.get("/catalog-feed.csv", async (req, res) => {
         const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
         const image = dish.imageUrl || "https://via.placeholder.com/400";
 
-      rows.push(
+rows.push(
   [
     csvField(id), csvField(title), csvField(description),
     csvField(availability), csvField("new"), csvField(price),
-    csvField(link), csvField(image), csvField("Khaatogo"),
+    csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
     csvField(dish.category || "Food"), // ★ NEW
     csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
   ].join(",")
@@ -277,9 +306,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
     const message = value?.messages?.[0];
     if (!message || !phoneNumberId) return;
 
-    const mapSnap = await db.ref(`phoneNumberIdToRestaurant/${phoneNumberId}`).once("value");
-    const restaurantId = mapSnap.val();
-    if (!restaurantId) {
+   const mapSnap = await db.ref(`phoneNumberIdToRestaurant/${phoneNumberId}`).once("value");
+const restaurantId = mapSnap.val();
+console.log(`📱 WhatsApp msg — phoneNumberId: ${phoneNumberId} → restaurantId: ${restaurantId}`); // ★ NEW
+if (!restaurantId) {
       console.log("Unknown phoneNumberId:", phoneNumberId);
       return;
     }

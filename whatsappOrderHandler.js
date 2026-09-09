@@ -1,12 +1,25 @@
 // whatsappOrderHandler.js
-const { sendText, sendButtons } = require("./whatsappOrderBot");
+const admin = require("firebase-admin"); // ★ NEW
+const { sendText, sendButtons, sendImage } = require("./whatsappOrderBot"); // ★ sendImage add
 
 async function getDishDetails(db, restaurantId, dishId) {
   const snap = await db.ref(`restaurants/${restaurantId}/menu/${dishId}`).once("value");
-  const dish = snap.val() || {};
+  let dish = snap.val();
+
+  // ★ NEW — realtimeDB mein na mile to Firestore "menu" collection try karo
+  if (!dish) {
+    try {
+      const fsSnap = await admin.firestore().collection("menu").doc(dishId).get();
+      if (fsSnap.exists) dish = fsSnap.data();
+    } catch (e) {
+      console.error("Firestore dish lookup failed:", e.message);
+    }
+  }
+
+  dish = dish || {};
   return {
     name: dish.name || "Item",
-    prepTime: Number(dish.prepTime) || 15, // ★ NEW — AddItem mein set kiya hua prep time
+    prepTime: Number(dish.prepTime) || 15,
   };
 }
 
@@ -273,8 +286,9 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     createdAt: Date.now(),
   };
 
-  await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).set(orderData);
-  await db.ref(`orders/${restaurantId}/${orderId}`).set(orderData); // ★ Admin dashboard (KOT + Bill dono) isi se order dekhega
+ await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).set(orderData);
+await db.ref(`orders/${restaurantId}/${orderId}`).set(orderData);
+console.log(`✅ Order written to orders/${restaurantId}/${orderId}`); // ★ NEW
 
   await sessionRef_remove(db, restaurantId, from);
 
@@ -294,24 +308,26 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
   }
 
   // ── Online payment: Razorpay payment link banao ──
-  const link = await razorpay.paymentLink.create({
-    amount: Math.round(total * 100),
-    currency: "INR",
-    accept_partial: false,
-    description: `Khaatogo Order ${orderId}`,
-    customer: { contact: from },
-    notify: { sms: false, email: false },
-    notes: { restaurantId, orderId, source: "whatsapp" },
-  });
+// ── Online payment: Razorpay QR code banao (fixed amount) ──
+const qr = await razorpay.qrCode.create({
+  type: "upi_qr",
+  name: `Khaatogo Order ${orderId}`,
+  usage: "single_use",
+  fixed_amount: true,
+  payment_amount: Math.round(total * 100),
+  description: `Khaatogo Order ${orderId}`,
+  notes: { restaurantId, orderId, source: "whatsapp" },
+});
 
-  await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update({ razorpayPaymentLinkId: link.id });
-  await db.ref(`orders/${restaurantId}/${orderId}`).update({ razorpayPaymentLinkId: link.id });
+await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
+await db.ref(`orders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
 
-  await sendText(
-    phoneNumberId,
-    from,
-    `💳 Payment karo:\n${link.short_url}\n\nOrder ID: ${orderId}${readyLine}`
-  );
+await sendImage(
+  phoneNumberId,
+  from,
+  qr.image_url,
+  `💳 Scan karke ₹${total.toFixed(2)} pay karo\nOrder ID: ${orderId}${readyLine}`
+);
 }
 
 async function sessionRef_remove(db, restaurantId, from) {

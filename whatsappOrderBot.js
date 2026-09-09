@@ -28,6 +28,14 @@ function sendText(phoneNumberId, to, text) {
     text: { body: text },
   });
 }
+function sendImage(phoneNumberId, to, imageUrl, caption) {
+  return sendWhatsAppMessage(phoneNumberId, {
+    to,
+    type: "image",
+    image: { link: imageUrl, caption },
+  });
+}
+
 
 // buttons: [{ id, title }] — max 3 buttons allowed by WhatsApp
 function sendButtons(phoneNumberId, to, bodyText, buttons) {
@@ -47,4 +55,4 @@ function sendButtons(phoneNumberId, to, bodyText, buttons) {
   });
 }
 
-module.exports = { sendText, sendButtons, sendWhatsAppMessage };
+module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage }; // ★ sendImage add kiya
