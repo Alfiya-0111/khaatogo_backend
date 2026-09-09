@@ -1,11 +1,13 @@
 // whatsappOrderHandler.js
 const { sendText, sendButtons } = require("./whatsappOrderBot");
 
-const TRACK_ORDER_BASE = "https://khaatogo.com/track-order"; // ★ apne actual tracking route se match karo
-
-async function getDishName(db, restaurantId, dishId) {
-  const snap = await db.ref(`restaurants/${restaurantId}/menu/${dishId}/name`).once("value");
-  return snap.val() || "Item";
+async function getDishDetails(db, restaurantId, dishId) {
+  const snap = await db.ref(`restaurants/${restaurantId}/menu/${dishId}`).once("value");
+  const dish = snap.val() || {};
+  return {
+    name: dish.name || "Item",
+    prepTime: Number(dish.prepTime) || 15, // ★ NEW — AddItem mein set kiya hua prep time
+  };
 }
 
 // ── Coupon validate + discount calculate karo ──
@@ -37,8 +39,20 @@ async function applyCoupon(db, restaurantId, code, subtotal) {
   return { discount: Math.round(discount * 100) / 100, code: match.code };
 }
 
+// ★ NEW — restaurant ka koi active, non-expired coupon hai ya nahi check karo
+async function hasActiveCoupon(db, restaurantId) {
+  const snap = await db.ref(`coupons/${restaurantId}`).once("value");
+  const coupons = snap.val() || {};
+  const now = Date.now();
+  return Object.values(coupons).some((c) => {
+    if (!c.active) return false;
+    if (c.expiryDate && new Date(c.expiryDate).getTime() < now) return false;
+    return true;
+  });
+}
+
 function billSummaryText(lines, subtotal, discount, couponCode) {
-  const itemsText = lines.map((l) => `${l.quantity} x ${l.name} = ₹${l.lineTotal.toFixed(2)}`).join("\n");
+  const itemsText = lines.map((l) => `${l.qty} x ${l.name} = ₹${l.lineTotal.toFixed(2)}`).join("\n"); // ★ CHANGED: l.quantity → l.qty
   let text = `🧾 Aapka order:\n${itemsText}\n\nSubtotal: ₹${subtotal.toFixed(2)}`;
   if (discount > 0) {
     text += `\n🏷️ Coupon (${couponCode}): −₹${discount.toFixed(2)}`;
@@ -63,15 +77,16 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     const lines = [];
     for (const it of rawItems) {
       const dishId = it.product_retailer_id.split("_").slice(1).join("_");
-      const name = await getDishName(db, restaurantId, dishId);
-      const lineTotal = (Number(it.item_price) || 0) * (Number(it.quantity) || 0);
+      const { name, prepTime } = await getDishDetails(db, restaurantId, dishId); // ★ CHANGED
+      const qty = Number(it.quantity) || 0; // ★ CHANGED
+      const lineTotal = (Number(it.item_price) || 0) * qty;
       subtotal += lineTotal;
-      lines.push({ dishId, name, quantity: it.quantity, price: it.item_price, lineTotal });
+      lines.push({ dishId, name, qty, price: it.item_price, lineTotal, prepTime }); // ★ CHANGED: quantity→qty, +prepTime
     }
 
     const orderId = `wa_${Date.now()}`;
     await sessionRef.set({
-      state: "awaiting_coupon_choice",
+      state: "processing",
       orderId,
       items: lines,
       subtotal,
@@ -80,10 +95,23 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     });
 
     await sendText(phoneNumberId, from, billSummaryText(lines, subtotal, 0, null));
-    await sendButtons(phoneNumberId, from, "Kya koi coupon apply karna hai?", [
-      { id: "coupon_yes", title: "Apply Coupon" },
-      { id: "coupon_no", title: "No Coupon" },
-    ]);
+
+    // ★ CHANGED — sirf tab coupon poocho jab restaurant ka koi active coupon ho
+    const couponAvailable = await hasActiveCoupon(db, restaurantId);
+    if (couponAvailable) {
+      await sessionRef.update({ state: "awaiting_coupon_choice" });
+      await sendButtons(phoneNumberId, from, "Kya koi coupon apply karna hai?", [
+        { id: "coupon_yes", title: "Apply Coupon" },
+        { id: "coupon_no", title: "No Coupon" },
+      ]);
+    } else {
+      await sessionRef.update({ state: "awaiting_order_type" });
+      await sendButtons(phoneNumberId, from, "Order kaise chahiye?", [
+        { id: "type_dinein", title: "Dine-in" },
+        { id: "type_delivery", title: "Delivery" },
+        { id: "type_takeaway", title: "Takeaway" },
+      ]);
+    }
     return;
   }
 
@@ -96,7 +124,6 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     const session = snap.val();
     if (!session) return;
 
-    // ── Coupon choice ──
     if (buttonId === "coupon_no") {
       await sessionRef.update({ state: "awaiting_order_type" });
       await sendButtons(phoneNumberId, from, "Order kaise chahiye?", [
@@ -113,7 +140,6 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       return;
     }
 
-    // ── Order type ──
     if (buttonId === "type_dinein") {
       await sessionRef.update({ state: "awaiting_table", orderType: "dine_in" });
       await sendText(phoneNumberId, from, "Table number bhejo (agar pata nahi to 'skip' likho):");
@@ -130,7 +156,6 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       return;
     }
 
-    // ── Confirm / Cancel ──
     if (buttonId === "confirm_order") {
       await sessionRef.update({ state: "awaiting_payment_method" });
       await sendButtons(phoneNumberId, from, "Payment kaise karenge?", [
@@ -145,7 +170,6 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       return;
     }
 
-    // ── Payment method ──
     if (buttonId === "pay_upi" || buttonId === "pay_cod") {
       const paymentMethod = buttonId === "pay_upi" ? "online" : "cod";
       await finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, session, paymentMethod);
@@ -222,10 +246,19 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
   const orderId = session.orderId;
   const total = session.subtotal - (session.discount || 0);
 
+  // ★ NEW — admin dashboard (Ordercard.js) ke items format se match karne ke liye
+  const orderItems = session.items.map((it) => ({
+    dishId: it.dishId,
+    name: it.name,
+    qty: it.qty,
+    price: it.price,
+    prepTime: it.prepTime || 15,
+  }));
+
   const orderData = {
     restaurantId,
     customerPhone: from,
-    items: session.items,
+    items: orderItems, // ★ CHANGED — qty field ke saath
     subtotal: session.subtotal,
     discount: session.discount || 0,
     couponCode: session.couponCode || null,
@@ -241,17 +274,21 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
   };
 
   await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).set(orderData);
-  await db.ref(`orders/${restaurantId}/${orderId}`).set(orderData); // ★ Admin dashboard isi se order dekhega
+  await db.ref(`orders/${restaurantId}/${orderId}`).set(orderData); // ★ Admin dashboard (KOT + Bill dono) isi se order dekhega
 
   await sessionRef_remove(db, restaurantId, from);
 
-  const trackLink = `${TRACK_ORDER_BASE}/${restaurantId}/${orderId}`;
+  // ★ CHANGED — track link ki jagah "X minute mein ready hoga" (AddItem ke prepTime se)
+  const maxPrepTime = orderItems.length > 0
+    ? Math.max(...orderItems.map((i) => i.prepTime || 15))
+    : 15;
+  const readyLine = `\n⏱️ Aapka order ~${maxPrepTime} minute mein ready ho jayega.`;
 
   if (paymentMethod === "cod") {
     await sendText(
       phoneNumberId,
       from,
-      `✅ Order confirm ho gaya!\nOrder ID: ${orderId}\nPayment cash pe.\n\n📍 Order track karo: ${trackLink}`
+      `✅ Order confirm ho gaya!\nOrder ID: ${orderId}\nPayment cash pe.${readyLine}`
     );
     return;
   }
@@ -273,7 +310,7 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
   await sendText(
     phoneNumberId,
     from,
-    `💳 Payment karo:\n${link.short_url}\n\nOrder ID: ${orderId}\n📍 Order track karo: ${trackLink}`
+    `💳 Payment karo:\n${link.short_url}\n\nOrder ID: ${orderId}${readyLine}`
   );
 }
 

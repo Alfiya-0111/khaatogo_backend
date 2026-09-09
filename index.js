@@ -148,14 +148,14 @@ app.get("/catalog-feed.csv", async (req, res) => {
     const csvField = (val) =>
       `"${String(val ?? "").replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
 
-    const HEADER = [
-      "id", "title", "description", "availability", "condition", "price",
-      "link", "image_link", "brand",
-      "availability_circle_origin.latitude",
-      "availability_circle_origin.longitude",
-      "availability_circle_radius",
-      "availability_circle_radius_unit",
-    ];
+  const HEADER = [
+  "id", "title", "description", "availability", "condition", "price",
+  "link", "image_link", "brand", "category", // ★ "category" add kiya
+  "availability_circle_origin.latitude",
+  "availability_circle_origin.longitude",
+  "availability_circle_radius",
+  "availability_circle_radius_unit",
+];
     const rows = [HEADER.join(",")];
 
     for (const [restaurantId, rData] of Object.entries(restaurants)) {
@@ -175,14 +175,15 @@ app.get("/catalog-feed.csv", async (req, res) => {
         const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
         const image = dish.imageUrl || "https://via.placeholder.com/400";
 
-        rows.push(
-          [
-            csvField(id), csvField(title), csvField(description),
-            csvField(availability), csvField("new"), csvField(price),
-            csvField(link), csvField(image), csvField("Khaatogo"),
-            csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
-          ].join(",")
-        );
+      rows.push(
+  [
+    csvField(id), csvField(title), csvField(description),
+    csvField(availability), csvField("new"), csvField(price),
+    csvField(link), csvField(image), csvField("Khaatogo"),
+    csvField(dish.category || "Food"), // ★ NEW
+    csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
+  ].join(",")
+);
       }
     }
 
