@@ -1,15 +1,14 @@
 // whatsappOrderHandler.js
 const admin = require("firebase-admin"); // ★ NEW
 const { sendText, sendButtons, sendImage } = require("./whatsappOrderBot"); // ★ sendImage add
-
+const { getFirestore } = require("firebase-admin/firestore"); // ★ ADD THIS
 async function getDishDetails(db, restaurantId, dishId) {
   const snap = await db.ref(`restaurants/${restaurantId}/menu/${dishId}`).once("value");
   let dish = snap.val();
 
-  // ★ NEW — realtimeDB mein na mile to Firestore "menu" collection try karo
   if (!dish) {
     try {
-      const fsSnap = await admin.firestore().collection("menu").doc(dishId).get();
+      const fsSnap = await getFirestore().collection("menu").doc(dishId).get(); // ★ CHANGED
       if (fsSnap.exists) dish = fsSnap.data();
     } catch (e) {
       console.error("Firestore dish lookup failed:", e.message);
@@ -89,7 +88,8 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     let subtotal = 0;
     const lines = [];
     for (const it of rawItems) {
-      const dishId = it.product_retailer_id.split("_").slice(1).join("_");
+     const dishId = it.product_retailer_id.split("_").slice(1).join("_");
+console.log("Resolved dishId:", dishId, "from retailer_id:", it.product_retailer_id); // ★ DEBUG
       const { name, prepTime } = await getDishDetails(db, restaurantId, dishId); // ★ CHANGED
       const qty = Number(it.quantity) || 0; // ★ CHANGED
       const lineTotal = (Number(it.item_price) || 0) * qty;

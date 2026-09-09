@@ -23,6 +23,28 @@ async function attachCatalogToWaba(wabaId, catalogId) {
   }
   return data;
 }
+async function createProductSetsByCategory(catalogId, categories) {
+  const results = [];
+  for (const category of categories) {
+    const res = await fetch(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${catalogId}/product_sets`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          access_token: ACCESS_TOKEN,
+          name: category,
+          filter: JSON.stringify({ category: { i_contains: category } }),
+        }),
+      }
+    );
+    const data = await res.json();
+    if (data.error) console.error(`Product set failed for ${category}:`, data.error.message);
+    else results.push({ category, productSetId: data.id });
+  }
+  return results;
+}
+
 
 // ── Business phone number pe cart + catalog visibility enable karo ──
 async function enableCommerceSettings(phoneNumberId) {
@@ -63,4 +85,4 @@ async function subscribeAppToWaba(wabaId) {
   return data;
 }
 
-module.exports = { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba };
+module.exports = { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba, createProductSetsByCategory }; // ★ export ad

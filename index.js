@@ -394,7 +394,7 @@ app.post("/test-catalog-sync", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-const { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba } = require("./whatsappCatalog");
+const { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba, createProductSetsByCategory } = require("./whatsappCatalog");
 
 // ══════════════════════════════════════════
 // ★ NEW: Restaurant ka catalog WhatsApp Business Account se attach karo
@@ -415,7 +415,16 @@ app.post("/attach-whatsapp-catalog", async (req, res) => {
         error: "Pehle catalog banao — /create-restaurant-catalog call karo",
       });
     }
+const menu = rData.menu || {};
+const categories = [...new Set(Object.values(menu).map(d => d.category || "Food"))]; // ★ NEW
+const productSets = await createProductSetsByCategory(result.catalogId, categories); // ★ NEW
 
+await db.ref(`restaurants/${restaurantId}/metaCatalog`).update({
+  catalogId: result.catalogId,
+  feedId: result.feedId,
+  productSets, // ★ NEW — track kar liya kaunsi category ka kaunsa set hai
+  createdAt: Date.now(),
+});
     const result = await attachCatalogToWaba(wabaId, catalogId);
 
     // ★ app ko WABA se subscribe karo taaki messages webhook aaye
