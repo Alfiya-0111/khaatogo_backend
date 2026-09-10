@@ -1,6 +1,6 @@
 // whatsappOrderHandler.js
 const admin = require("firebase-admin"); // ★ NEW
-const { sendText, sendButtons, sendImage } = require("./whatsappOrderBot"); // ★ sendImage add
+const { sendText, sendButtons, sendImage, sendProductList } = require("./whatsappOrderBot"); 
 const { getFirestore } = require("firebase-admin/firestore"); // ★ ADD THIS
 async function getDishDetails(db, restaurantId, dishId) {
   const snap = await db.ref(`restaurants/${restaurantId}/menu/${dishId}`).once("value");
@@ -21,7 +21,48 @@ async function getDishDetails(db, restaurantId, dishId) {
     prepTime: Number(dish.prepTime) || 15,
   };
 }
+async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
+  const [menuSnap, catalogSnap] = await Promise.all([
+    db.ref(`restaurants/${restaurantId}/menu`).once("value"),
+    db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value"),
+  ]);
 
+  const menu = menuSnap.val() || {};
+  const catalogId = catalogSnap.val();
+
+  if (!catalogId) {
+    await sendText(phoneNumberId, from, "Menu abhi setup ho raha hai, thodi der baad try karo 🙏");
+    return;
+  }
+
+  // category ke hisaab se group karo
+  const grouped = {};
+  for (const [dishId, dish] of Object.entries(menu)) {
+    if (dish.inStock === false || dish.remainingQuantity === 0) continue; // out-of-stock skip
+    const cat = dish.category || "Food";
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push({ product_retailer_id: `${restaurantId}_${dishId}` });
+  }
+
+  // WhatsApp limit: max 30 sections, har section max 30 items — extra safety trim
+  const sections = Object.entries(grouped)
+    .slice(0, 30)
+    .map(([title, items]) => ({ title: title.slice(0, 24), product_items: items.slice(0, 30) }));
+
+  if (sections.length === 0) {
+    await sendText(phoneNumberId, from, "Abhi menu khaali hai, thodi der baad try karo 🙏");
+    return;
+  }
+
+  await sendProductList(
+    phoneNumberId,
+    from,
+    catalogId,
+    "Hamara Menu 🍽️",
+    "Neeche se items select karo aur cart mein add karke order karo:",
+    sections
+  );
+}
 // ── Coupon validate + discount calculate karo ──
 async function applyCoupon(db, restaurantId, code, subtotal) {
   const snap = await db.ref(`coupons/${restaurantId}`).once("value");
@@ -77,6 +118,31 @@ function billSummaryText(lines, subtotal, discount, couponCode) {
 async function handleIncomingMessage(db, razorpay, message, phoneNumberId, restaurantId) {
   const from = message.from;
   const sessionRef = db.ref(`whatsappSessions/${restaurantId}/${from}`);
+
+  // ══════════════════════════════════════════
+  // ★ NEW: Free text aur koi active session/order-flow nahi → poora menu bhejo
+  // ══════════════════════════════════════════
+  if (message.type === "text") {
+    const snap = await sessionRef.once("value");
+    const session = snap.val();
+
+    // Sirf tab menu bhejo jab customer koi ongoing order-flow mein NA ho
+    const isMidFlow = session && [
+      "awaiting_coupon_code",
+      "awaiting_table",
+      "awaiting_address",
+      "awaiting_order_type",
+      "awaiting_payment_method",
+      "awaiting_confirm",
+      "awaiting_coupon_choice",
+    ].includes(session.state);
+
+    if (!isMidFlow) {
+      await sendFullMenu(db, phoneNumberId, from, restaurantId);
+      return;
+    }
+  }
+
 
   // ══════════════════════════════════════════
   // 1) Customer ne cart order bheja
