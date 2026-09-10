@@ -8,7 +8,7 @@ async function getDishDetails(db, restaurantId, dishId) {
 
   if (!dish) {
     try {
-      const fsSnap = await getFirestore().collection("menu").doc(dishId).get(); // ★ CHANGED
+      const fsSnap = await getFirestore().collection("menu").doc(dishId).get();
       if (fsSnap.exists) dish = fsSnap.data();
     } catch (e) {
       console.error("Firestore dish lookup failed:", e.message);
@@ -19,6 +19,7 @@ async function getDishDetails(db, restaurantId, dishId) {
   return {
     name: dish.name || "Item",
     prepTime: Number(dish.prepTime) || 15,
+    image: dish.imageUrl || dish.image || "", // ★ NEW
   };
 }
 async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
@@ -156,11 +157,11 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     for (const it of rawItems) {
      const dishId = it.product_retailer_id.split("_").slice(1).join("_");
 console.log("Resolved dishId:", dishId, "from retailer_id:", it.product_retailer_id); // ★ DEBUG
-      const { name, prepTime } = await getDishDetails(db, restaurantId, dishId); // ★ CHANGED
+      const { name, prepTime, image } = await getDishDetails(db, restaurantId, dishId); // ★ CHANGED
       const qty = Number(it.quantity) || 0; // ★ CHANGED
       const lineTotal = (Number(it.item_price) || 0) * qty;
       subtotal += lineTotal;
-      lines.push({ dishId, name, qty, price: it.item_price, lineTotal, prepTime }); // ★ CHANGED: quantity→qty, +prepTime
+    lines.push({ dishId, name, qty, price: it.item_price, lineTotal, prepTime, image }); 
     }
 
     const orderId = `wa_${Date.now()}`;
@@ -332,13 +333,16 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     qty: it.qty,
     price: it.price,
     prepTime: it.prepTime || 15,
+     image: it.image || "",
   }));
 
   const orderData = {
     restaurantId,
     customerPhone: from,
+        items: orderItems,
     items: orderItems, // ★ CHANGED — qty field ke saath
     subtotal: session.subtotal,
+ 
     discount: session.discount || 0,
     couponCode: session.couponCode || null,
     total,
