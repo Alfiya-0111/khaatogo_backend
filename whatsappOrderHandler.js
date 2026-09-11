@@ -1,7 +1,9 @@
 // whatsappOrderHandler.js
-const admin = require("firebase-admin"); // ★ NEW
-const { sendText, sendButtons, sendImage, sendProductList } = require("./whatsappOrderBot"); 
-const { getFirestore } = require("firebase-admin/firestore"); // ★ ADD THIS
+const admin = require("firebase-admin");
+const { sendText, sendButtons, sendImage, sendProductList } = require("./whatsappOrderBot");
+const { getFirestore } = require("firebase-admin/firestore");
+
+// ★ CHANGED — ab dish ka taste profile bhi laata hai (spice/salt/sweet/salad options decide karne ke liye)
 async function getDishDetails(db, restaurantId, dishId) {
   const snap = await db.ref(`restaurants/${restaurantId}/menu/${dishId}`).once("value");
   let dish = snap.val();
@@ -19,9 +21,14 @@ async function getDishDetails(db, restaurantId, dishId) {
   return {
     name: dish.name || "Item",
     prepTime: Number(dish.prepTime) || 15,
-    image: dish.imageUrl || dish.image || "", // ★ NEW
+    image: dish.imageUrl || dish.image || "",
+    dishTasteProfile: dish.dishTasteProfile || "normal", // ★ NEW
+    saltLevelEnabled: !!dish.saltLevelEnabled,            // ★ NEW
+    sugarLevelEnabled: !!dish.sugarLevelEnabled,          // ★ NEW
+    saladConfig: dish.saladConfig || null,                // ★ NEW
   };
 }
+
 async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
   const [menuSnap, catalogSnap] = await Promise.all([
     db.ref(`restaurants/${restaurantId}/menu`).once("value"),
@@ -36,16 +43,14 @@ async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
     return;
   }
 
-  // category ke hisaab se group karo
   const grouped = {};
   for (const [dishId, dish] of Object.entries(menu)) {
-    if (dish.inStock === false || dish.remainingQuantity === 0) continue; // out-of-stock skip
+    if (dish.inStock === false || dish.remainingQuantity === 0) continue;
     const cat = dish.category || "Food";
     if (!grouped[cat]) grouped[cat] = [];
     grouped[cat].push({ product_retailer_id: `${restaurantId}_${dishId}` });
   }
 
-  // WhatsApp limit: max 30 sections, har section max 30 items — extra safety trim
   const sections = Object.entries(grouped)
     .slice(0, 30)
     .map(([title, items]) => ({ title: title.slice(0, 24), product_items: items.slice(0, 30) }));
@@ -64,7 +69,8 @@ async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
     sections
   );
 }
-// ── Coupon validate + discount calculate karo ──
+
+// ── Coupon logic (unchanged) ──
 async function applyCoupon(db, restaurantId, code, subtotal) {
   const snap = await db.ref(`coupons/${restaurantId}`).once("value");
   const coupons = snap.val() || {};
@@ -93,7 +99,6 @@ async function applyCoupon(db, restaurantId, code, subtotal) {
   return { discount: Math.round(discount * 100) / 100, code: match.code };
 }
 
-// ★ NEW — restaurant ka koi active, non-expired coupon hai ya nahi check karo
 async function hasActiveCoupon(db, restaurantId) {
   const snap = await db.ref(`coupons/${restaurantId}`).once("value");
   const coupons = snap.val() || {};
@@ -106,7 +111,17 @@ async function hasActiveCoupon(db, restaurantId) {
 }
 
 function billSummaryText(lines, subtotal, discount, couponCode) {
-  const itemsText = lines.map((l) => `${l.qty} x ${l.name} = ₹${l.lineTotal.toFixed(2)}`).join("\n"); // ★ CHANGED: l.quantity → l.qty
+  const itemsText = lines.map((l) => {
+    let line = `${l.qty} x ${l.name} = ₹${l.lineTotal.toFixed(2)}`;
+    const tags = [];
+    if (l.dishTasteProfile !== "sweet" && l.spicePreference && l.spicePreference !== "normal") tags.push(`🌶️ ${l.spicePreference}`);
+    if (l.dishTasteProfile === "sweet" && l.sweetLevel && l.sweetLevel !== "normal") tags.push(`🍯 ${l.sweetLevel}`);
+    if (l.saltPreference && l.saltPreference !== "normal") tags.push(`🧂 ${l.saltPreference}`);
+    if (l.salad?.qty > 0) tags.push(`🥗 Salad`);
+    if (tags.length) line += `\n   (${tags.join(", ")})`;
+    if (l.specialInstructions) line += `\n   📝 ${l.specialInstructions}`;
+    return line;
+  }).join("\n");
   let text = `🧾 Aapka order:\n${itemsText}\n\nSubtotal: ₹${subtotal.toFixed(2)}`;
   if (discount > 0) {
     text += `\n🏷️ Coupon (${couponCode}): −₹${discount.toFixed(2)}`;
@@ -116,34 +131,45 @@ function billSummaryText(lines, subtotal, discount, couponCode) {
   return text;
 }
 
+// ★ NEW — dish ke taste profile ke hisaab se decide karo kaunse customization steps chahiye
+function getCustomizationSteps(item) {
+  const steps = [];
+  if (item.dishTasteProfile === "spicy") {
+    steps.push("spice");
+    if (item.saltLevelEnabled) steps.push("salt");
+  }
+  if (item.dishTasteProfile === "sweet" && item.sugarLevelEnabled) {
+    steps.push("sweet");
+  }
+  if (item.saladConfig?.enabled) steps.push("salad");
+  steps.push("note"); // hamesha special instruction ka option do (skip bhi kar sakte hain)
+  return steps;
+}
+
+const MID_FLOW_STATES = [
+  "awaiting_coupon_code", "awaiting_table", "awaiting_address",
+  "awaiting_order_type", "awaiting_payment_method", "awaiting_confirm",
+  "awaiting_coupon_choice", "awaiting_spice", "awaiting_salt", "awaiting_sweet",
+  "awaiting_salad", "awaiting_note_choice", "awaiting_note_text",
+];
+
 async function handleIncomingMessage(db, razorpay, message, phoneNumberId, restaurantId) {
   const from = message.from;
   const sessionRef = db.ref(`whatsappSessions/${restaurantId}/${from}`);
 
   // ══════════════════════════════════════════
-  // ★ NEW: Free text aur koi active session/order-flow nahi → poora menu bhejo
+  // Free text aur koi active order-flow nahi → poora menu bhejo
   // ══════════════════════════════════════════
   if (message.type === "text") {
     const snap = await sessionRef.once("value");
     const session = snap.val();
-
-    // Sirf tab menu bhejo jab customer koi ongoing order-flow mein NA ho
-    const isMidFlow = session && [
-      "awaiting_coupon_code",
-      "awaiting_table",
-      "awaiting_address",
-      "awaiting_order_type",
-      "awaiting_payment_method",
-      "awaiting_confirm",
-      "awaiting_coupon_choice",
-    ].includes(session.state);
+    const isMidFlow = session && MID_FLOW_STATES.includes(session.state);
 
     if (!isMidFlow) {
       await sendFullMenu(db, phoneNumberId, from, restaurantId);
       return;
     }
   }
-
 
   // ══════════════════════════════════════════
   // 1) Customer ne cart order bheja
@@ -155,43 +181,45 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     let subtotal = 0;
     const lines = [];
     for (const it of rawItems) {
-     const dishId = it.product_retailer_id.split("_").slice(1).join("_");
-console.log("Resolved dishId:", dishId, "from retailer_id:", it.product_retailer_id); // ★ DEBUG
-      const { name, prepTime, image } = await getDishDetails(db, restaurantId, dishId); // ★ CHANGED
-      const qty = Number(it.quantity) || 0; // ★ CHANGED
+      const dishId = it.product_retailer_id.split("_").slice(1).join("_");
+      const dishInfo = await getDishDetails(db, restaurantId, dishId);
+      const qty = Number(it.quantity) || 0;
       const lineTotal = (Number(it.item_price) || 0) * qty;
       subtotal += lineTotal;
-    lines.push({ dishId, name, qty, price: it.item_price, lineTotal, prepTime, image }); 
+
+      lines.push({
+        dishId, name: dishInfo.name, qty, price: it.item_price, lineTotal,
+        prepTime: dishInfo.prepTime, image: dishInfo.image,
+        dishTasteProfile: dishInfo.dishTasteProfile,   // ★ NEW
+        saltLevelEnabled: dishInfo.saltLevelEnabled,   // ★ NEW (temp, order mein save nahi hoga)
+        sugarLevelEnabled: dishInfo.sugarLevelEnabled, // ★ NEW
+        saladConfig: dishInfo.saladConfig,             // ★ NEW
+        // ★ NEW — defaults, customization ke baad update honge
+        spicePreference: "normal",
+        saltPreference: "normal",
+        sweetLevel: "normal",
+        salad: { qty: 0, taste: "normal" },
+        specialInstructions: "",
+      });
     }
 
     const orderId = `wa_${Date.now()}`;
+    const customizePlan = lines.map((l) => getCustomizationSteps(l));
+
     await sessionRef.set({
-      state: "processing",
+      state: "customizing",
       orderId,
       items: lines,
       subtotal,
       discount: 0,
       createdAt: Date.now(),
+      customizePlan,
+      customizeItemIdx: 0,
+      customizeStepIdx: 0,
     });
 
-    await sendText(phoneNumberId, from, billSummaryText(lines, subtotal, 0, null));
-
-    // ★ CHANGED — sirf tab coupon poocho jab restaurant ka koi active coupon ho
-    const couponAvailable = await hasActiveCoupon(db, restaurantId);
-    if (couponAvailable) {
-      await sessionRef.update({ state: "awaiting_coupon_choice" });
-      await sendButtons(phoneNumberId, from, "Kya koi coupon apply karna hai?", [
-        { id: "coupon_yes", title: "Apply Coupon" },
-        { id: "coupon_no", title: "No Coupon" },
-      ]);
-    } else {
-      await sessionRef.update({ state: "awaiting_order_type" });
-      await sendButtons(phoneNumberId, from, "Order kaise chahiye?", [
-        { id: "type_dinein", title: "Dine-in" },
-        { id: "type_delivery", title: "Delivery" },
-        { id: "type_takeaway", title: "Takeaway" },
-      ]);
-    }
+    await sendText(phoneNumberId, from, "Bas thodi si detail chahiye har item ke liye 🙏");
+    await askCurrentQuestion(db, phoneNumberId, from, restaurantId, sessionRef);
     return;
   }
 
@@ -203,6 +231,12 @@ console.log("Resolved dishId:", dishId, "from retailer_id:", it.product_retailer
     const snap = await sessionRef.once("value");
     const session = snap.val();
     if (!session) return;
+
+    // ★ NEW — customization ke buttons
+    if (["awaiting_spice", "awaiting_salt", "awaiting_sweet", "awaiting_salad", "awaiting_note_choice"].includes(session.state)) {
+      await handleCustomizationButton(db, phoneNumberId, from, restaurantId, sessionRef, session, buttonId);
+      return;
+    }
 
     if (buttonId === "coupon_no") {
       await sessionRef.update({ state: "awaiting_order_type" });
@@ -258,12 +292,23 @@ console.log("Resolved dishId:", dishId, "from retailer_id:", it.product_retailer
   }
 
   // ══════════════════════════════════════════
-  // 3) Free text (coupon code / table / address)
+  // 3) Free text (coupon code / table / address / special instruction)
   // ══════════════════════════════════════════
   if (message.type === "text") {
     const snap = await sessionRef.once("value");
     const session = snap.val();
     if (!session) return;
+
+    // ★ NEW — special instruction text ka jawab
+    if (session.state === "awaiting_note_text") {
+      const note = message.text.body.trim();
+      const items = [...session.items];
+      const idx = session.customizeItemIdx;
+      items[idx] = { ...items[idx], specialInstructions: note.toLowerCase() === "skip" ? "" : note };
+      await sessionRef.update({ items, customizeStepIdx: session.customizeStepIdx + 1 });
+      await askCurrentQuestion(db, phoneNumberId, from, restaurantId, sessionRef);
+      return;
+    }
 
     if (session.state === "awaiting_coupon_code") {
       const code = message.text.body.trim();
@@ -308,6 +353,138 @@ console.log("Resolved dishId:", dishId, "from retailer_id:", it.product_retailer
   }
 }
 
+// ★ NEW — customization ka agla sawaal decide karke bhejta hai
+async function askCurrentQuestion(db, phoneNumberId, from, restaurantId, sessionRef) {
+  const snap = await sessionRef.once("value");
+  const session = snap.val();
+  if (!session) return;
+
+  const { items, customizePlan } = session;
+  let itemIdx = session.customizeItemIdx;
+  let stepIdx = session.customizeStepIdx;
+
+  // Saare items ke customization complete ho gaye
+  if (itemIdx >= items.length) {
+    await sessionRef.update({ state: "collected" });
+    await proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId, sessionRef);
+    return;
+  }
+
+  const steps = customizePlan[itemIdx];
+
+  // Is item ke saare steps ho gaye — agle item pe jao
+  if (stepIdx >= steps.length) {
+    itemIdx += 1;
+    stepIdx = 0;
+    await sessionRef.update({ customizeItemIdx: itemIdx, customizeStepIdx: stepIdx });
+    return askCurrentQuestion(db, phoneNumberId, from, restaurantId, sessionRef);
+  }
+
+  const item = items[itemIdx];
+  const step = steps[stepIdx];
+  const label = `*${item.name}* (${itemIdx + 1}/${items.length})`;
+
+  if (step === "spice") {
+    await sessionRef.update({ state: "awaiting_spice" });
+    await sendButtons(phoneNumberId, from, `${label}\n🌶️ Spice level kitna chahiye?`, [
+      { id: "spice_normal", title: "Normal" },
+      { id: "spice_medium", title: "Medium" },
+      { id: "spice_spicy", title: "Spicy" },
+    ]);
+    return;
+  }
+  if (step === "salt") {
+    await sessionRef.update({ state: "awaiting_salt" });
+    await sendButtons(phoneNumberId, from, `${label}\n🧂 Salt kitna chahiye?`, [
+      { id: "salt_normal", title: "Normal" },
+      { id: "salt_medium", title: "Medium" },
+      { id: "salt_extra", title: "Extra" },
+    ]);
+    return;
+  }
+  if (step === "sweet") {
+    await sessionRef.update({ state: "awaiting_sweet" });
+    await sendButtons(phoneNumberId, from, `${label}\n🍯 Sweetness kitni chahiye?`, [
+      { id: "sweet_less", title: "Less" },
+      { id: "sweet_normal", title: "Normal" },
+      { id: "sweet_extra", title: "Extra" },
+    ]);
+    return;
+  }
+  if (step === "salad") {
+    await sessionRef.update({ state: "awaiting_salad" });
+    await sendButtons(phoneNumberId, from, `${label}\n🥗 Salad add karna hai?`, [
+      { id: "salad_yes", title: "Yes" },
+      { id: "salad_no", title: "No" },
+    ]);
+    return;
+  }
+  if (step === "note") {
+    await sessionRef.update({ state: "awaiting_note_choice" });
+    await sendButtons(phoneNumberId, from, `${label}\n📝 Koi special instruction hai?`, [
+      { id: "note_yes", title: "Haan, likhna hai" },
+      { id: "note_skip", title: "Nahi, skip" },
+    ]);
+    return;
+  }
+}
+
+// ★ NEW — customization button-reply handle karo
+async function handleCustomizationButton(db, phoneNumberId, from, restaurantId, sessionRef, session, buttonId) {
+  const items = [...session.items];
+  const idx = session.customizeItemIdx;
+  let stepIdx = session.customizeStepIdx;
+
+  if (session.state === "awaiting_spice") {
+    items[idx] = { ...items[idx], spicePreference: buttonId.replace("spice_", "") };
+    stepIdx += 1;
+  } else if (session.state === "awaiting_salt") {
+    items[idx] = { ...items[idx], saltPreference: buttonId.replace("salt_", "") };
+    stepIdx += 1;
+  } else if (session.state === "awaiting_sweet") {
+    items[idx] = { ...items[idx], sweetLevel: buttonId.replace("sweet_", "") };
+    stepIdx += 1;
+  } else if (session.state === "awaiting_salad") {
+    items[idx] = { ...items[idx], salad: { qty: buttonId === "salad_yes" ? 1 : 0, taste: "normal" } };
+    stepIdx += 1;
+  } else if (session.state === "awaiting_note_choice") {
+    if (buttonId === "note_yes") {
+      await sessionRef.update({ state: "awaiting_note_text" });
+      await sendText(phoneNumberId, from, "Special instruction type karke bhejo:");
+      return; // stepIdx yahan nahi badhega — text milne ke baad badhega
+    } else {
+      stepIdx += 1; // skip
+    }
+  }
+
+  await sessionRef.update({ items, customizeStepIdx: stepIdx });
+  await askCurrentQuestion(db, phoneNumberId, from, restaurantId, sessionRef);
+}
+
+// ★ NEW — customization complete hone ke baad bill dikhao + coupon/order-type poocho
+async function proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId, sessionRef) {
+  const snap = await sessionRef.once("value");
+  const session = snap.val();
+
+  await sendText(phoneNumberId, from, billSummaryText(session.items, session.subtotal, 0, null));
+
+  const couponAvailable = await hasActiveCoupon(db, restaurantId);
+  if (couponAvailable) {
+    await sessionRef.update({ state: "awaiting_coupon_choice" });
+    await sendButtons(phoneNumberId, from, "Kya koi coupon apply karna hai?", [
+      { id: "coupon_yes", title: "Apply Coupon" },
+      { id: "coupon_no", title: "No Coupon" },
+    ]);
+  } else {
+    await sessionRef.update({ state: "awaiting_order_type" });
+    await sendButtons(phoneNumberId, from, "Order kaise chahiye?", [
+      { id: "type_dinein", title: "Dine-in" },
+      { id: "type_delivery", title: "Delivery" },
+      { id: "type_takeaway", title: "Takeaway" },
+    ]);
+  }
+}
+
 async function sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef) {
   const snap = await sessionRef.once("value");
   const session = snap.val();
@@ -326,23 +503,27 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
   const orderId = session.orderId;
   const total = session.subtotal - (session.discount || 0);
 
-  // ★ NEW — admin dashboard (Ordercard.js) ke items format se match karne ke liye
+  // ★ CHANGED — ab spice/salt/sweet/salad/note bhi order mein jayenge (Admin/KOT/KDS format se match)
   const orderItems = session.items.map((it) => ({
     dishId: it.dishId,
     name: it.name,
     qty: it.qty,
     price: it.price,
     prepTime: it.prepTime || 15,
-     image: it.image || "",
+    image: it.image || "",
+    dishTasteProfile: it.dishTasteProfile || "normal",
+    spicePreference: it.spicePreference || "normal",
+    saltPreference: it.saltPreference || "normal",
+    sweetLevel: it.sweetLevel || "normal",
+    salad: it.salad || { qty: 0, taste: "normal" },
+    specialInstructions: it.specialInstructions || "",
   }));
 
   const orderData = {
     restaurantId,
     customerPhone: from,
-        items: orderItems,
-    items: orderItems, // ★ CHANGED — qty field ke saath
+    items: orderItems,
     subtotal: session.subtotal,
- 
     discount: session.discount || 0,
     couponCode: session.couponCode || null,
     total,
@@ -356,13 +537,12 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     createdAt: Date.now(),
   };
 
- await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).set(orderData);
-await db.ref(`orders/${restaurantId}/${orderId}`).set(orderData);
-console.log(`✅ Order written to orders/${restaurantId}/${orderId}`); // ★ NEW
+  await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).set(orderData);
+  await db.ref(`orders/${restaurantId}/${orderId}`).set(orderData);
+  console.log(`✅ Order written to orders/${restaurantId}/${orderId}`);
 
   await sessionRef_remove(db, restaurantId, from);
 
-  // ★ CHANGED — track link ki jagah "X minute mein ready hoga" (AddItem ke prepTime se)
   const maxPrepTime = orderItems.length > 0
     ? Math.max(...orderItems.map((i) => i.prepTime || 15))
     : 15;
@@ -377,27 +557,25 @@ console.log(`✅ Order written to orders/${restaurantId}/${orderId}`); // ★ NE
     return;
   }
 
-  // ── Online payment: Razorpay payment link banao ──
-// ── Online payment: Razorpay QR code banao (fixed amount) ──
-const qr = await razorpay.qrCode.create({
-  type: "upi_qr",
-  name: `Khaatogo Order ${orderId}`,
-  usage: "single_use",
-  fixed_amount: true,
-  payment_amount: Math.round(total * 100),
-  description: `Khaatogo Order ${orderId}`,
-  notes: { restaurantId, orderId, source: "whatsapp" },
-});
+  const qr = await razorpay.qrCode.create({
+    type: "upi_qr",
+    name: `Khaatogo Order ${orderId}`,
+    usage: "single_use",
+    fixed_amount: true,
+    payment_amount: Math.round(total * 100),
+    description: `Khaatogo Order ${orderId}`,
+    notes: { restaurantId, orderId, source: "whatsapp" },
+  });
 
-await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
-await db.ref(`orders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
+  await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
+  await db.ref(`orders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
 
-await sendImage(
-  phoneNumberId,
-  from,
-  qr.image_url,
-  `💳 Scan karke ₹${total.toFixed(2)} pay karo\nOrder ID: ${orderId}${readyLine}`
-);
+  await sendImage(
+    phoneNumberId,
+    from,
+    qr.image_url,
+    `💳 Scan karke ₹${total.toFixed(2)} pay karo\nOrder ID: ${orderId}${readyLine}`
+  );
 }
 
 async function sessionRef_remove(db, restaurantId, from) {
