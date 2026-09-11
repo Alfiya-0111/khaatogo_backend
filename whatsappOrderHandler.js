@@ -30,13 +30,15 @@ async function getDishDetails(db, restaurantId, dishId) {
 }
 
 async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
-  const [menuSnap, catalogSnap] = await Promise.all([
+  const [menuSnap, catalogSnap, catSnap] = await Promise.all([
     db.ref(`restaurants/${restaurantId}/menu`).once("value"),
     db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value"),
+    db.ref(`restaurants/${restaurantId}/categories`).once("value"), // ★ NEW
   ]);
 
   const menu = menuSnap.val() || {};
   const catalogId = catalogSnap.val();
+  const categoriesData = catSnap.val() || {}; // ★ NEW — { catId: { name: "..." } }
 
   if (!catalogId) {
     await sendText(phoneNumberId, from, "Menu abhi setup ho raha hai, thodi der baad try karo 🙏");
@@ -46,9 +48,23 @@ async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
   const grouped = {};
   for (const [dishId, dish] of Object.entries(menu)) {
     if (dish.inStock === false || dish.remainingQuantity === 0) continue;
-    const cat = dish.category || "Food";
-    if (!grouped[cat]) grouped[cat] = [];
-    grouped[cat].push({ product_retailer_id: `${restaurantId}_${dishId}` });
+
+    // ★ NEW — naya categoryIds system pehle try karo, fallback purana category string
+    let catNames = [];
+    if (Array.isArray(dish.categoryIds) && dish.categoryIds.length > 0) {
+      dish.categoryIds.forEach((cid) => {
+        const catName = categoriesData[cid]?.name;
+        if (catName) catNames.push(catName);
+      });
+    } else if (dish.category) {
+      catNames.push(dish.category);
+    }
+    if (catNames.length === 0) catNames.push("Other");
+
+    catNames.forEach((cat) => {
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push({ product_retailer_id: `${restaurantId}_${dishId}` });
+    });
   }
 
   const sections = Object.entries(grouped)
@@ -130,6 +146,65 @@ function billSummaryText(lines, subtotal, discount, couponCode) {
   text += `\n\n*Total: ₹${total.toFixed(2)}*`;
   return text;
 }
+// ★ NEW — dish stock RTDB + Firestore dono jagah decrement karo (admin SDK)
+async function decrementStockForOrder(db, restaurantId, items) {
+  const { getFirestore } = require("firebase-admin/firestore");
+  const firestore = getFirestore();
+
+  for (const item of items) {
+    if (!item.dishId) continue;
+    const qtyToDeduct = Number(item.qty) || 1;
+
+    try {
+      // ── Realtime DB update ──
+      const menuRef = db.ref(`restaurants/${restaurantId}/menu/${item.dishId}`);
+      const snap = await menuRef.once("value");
+      if (snap.exists()) {
+        const data = snap.val();
+        // quantity field set hi nahi hai to unlimited-stock dish hai — skip
+        if (data.quantity === undefined || data.quantity === null) continue;
+
+        const currentUsed = Number(data.quantityUsed) || 0;
+        const newUsed = currentUsed + qtyToDeduct;
+        const remaining = Math.max(0, (Number(data.quantity) || 0) - newUsed);
+
+        await menuRef.update({
+          quantityUsed: newUsed,
+          remainingQuantity: remaining,
+          inStock: remaining > 0,
+          outOfStock: remaining <= 0,
+          updatedAt: Date.now(),
+        });
+
+        // ── Firestore update (agar dish Firestore "menu" collection mein bhi hai) ──
+        try {
+          const fsSnap = await firestore
+            .collection("menu")
+            .where("restaurantId", "==", restaurantId)
+            .where("__name__", "==", item.dishId)
+            .get();
+          if (!fsSnap.empty) {
+            await fsSnap.docs[0].ref.update({
+              quantityUsed: newUsed,
+              remainingQuantity: remaining,
+              inStock: remaining > 0,
+              outOfStock: remaining <= 0,
+              updatedAt: Date.now(),
+            });
+          }
+        } catch (fsErr) {
+          console.error(`Firestore stock update failed for ${item.dishId}:`, fsErr.message);
+        }
+      }
+    } catch (e) {
+      console.error(`Stock decrement failed for ${item.name}:`, e.message);
+    }
+  }
+}
+
+
+  
+
 
 // ★ NEW — dish ke taste profile ke hisaab se decide karo kaunse customization steps chahiye
 function getCustomizationSteps(item) {
@@ -137,12 +212,12 @@ function getCustomizationSteps(item) {
   if (item.dishTasteProfile === "spicy") {
     steps.push("spice");
     if (item.saltLevelEnabled) steps.push("salt");
+    if (item.saladConfig?.enabled) steps.push("salad"); // ★ ab sirf spicy ke andar
+  } else if (item.dishTasteProfile === "sweet") {
+    if (item.sugarLevelEnabled) steps.push("sweet");
+    // ★ sweet dish mein salad nahi poocha jayega
   }
-  if (item.dishTasteProfile === "sweet" && item.sugarLevelEnabled) {
-    steps.push("sweet");
-  }
-  if (item.saladConfig?.enabled) steps.push("salad");
-  steps.push("note"); // hamesha special instruction ka option do (skip bhi kar sakte hain)
+  steps.push("note"); // special instruction hamesha optional rahega
   return steps;
 }
 
@@ -540,6 +615,8 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
   await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).set(orderData);
   await db.ref(`orders/${restaurantId}/${orderId}`).set(orderData);
   console.log(`✅ Order written to orders/${restaurantId}/${orderId}`);
+
+ await decrementStockForOrder(db, restaurantId, orderItems);
 
   await sessionRef_remove(db, restaurantId, from);
 
