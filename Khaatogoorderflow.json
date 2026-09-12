@@ -1,0 +1,186 @@
+{
+  "version": "5.0",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "ITEM_CUSTOMIZE": ["ITEM_CUSTOMIZE", "ORDER_DETAILS"],
+    "ORDER_DETAILS": ["CONFIRM"],
+    "CONFIRM": []
+  },
+  "screens": [
+    {
+      "id": "ITEM_CUSTOMIZE",
+      "title": "Customize Item",
+      "data": {
+        "item_name": { "type": "string", "__example__": "Paneer Tikka (1/3)" },
+        "show_spice": { "type": "boolean", "__example__": true },
+        "show_salt": { "type": "boolean", "__example__": false },
+        "show_sweet": { "type": "boolean", "__example__": false },
+        "running_total": { "type": "string", "__example__": "Total so far: ₹350" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "item_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "${data.item_name}"
+              },
+              {
+                "type": "Dropdown",
+                "name": "spice",
+                "label": "🌶️ Spice level",
+                "visible": "${data.show_spice}",
+                "data-source": [
+                  { "id": "normal", "title": "Normal" },
+                  { "id": "medium", "title": "Medium" },
+                  { "id": "spicy", "title": "Spicy" }
+                ]
+              },
+              {
+                "type": "Dropdown",
+                "name": "salt",
+                "label": "🧂 Salt",
+                "visible": "${data.show_salt}",
+                "data-source": [
+                  { "id": "normal", "title": "Normal" },
+                  { "id": "medium", "title": "Medium" },
+                  { "id": "extra", "title": "Extra" }
+                ]
+              },
+              {
+                "type": "Dropdown",
+                "name": "sweet",
+                "label": "🍯 Sweetness",
+                "visible": "${data.show_sweet}",
+                "data-source": [
+                  { "id": "less", "title": "Less" },
+                  { "id": "normal", "title": "Normal" },
+                  { "id": "extra", "title": "Extra" }
+                ]
+              },
+              {
+                "type": "TextInput",
+                "name": "note",
+                "label": "📝 Special instruction (optional)",
+                "required": false
+              },
+              {
+                "type": "TextCaption",
+                "text": "${data.running_total}"
+              },
+              {
+                "type": "Footer",
+                "label": "Next",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "trigger": "item_next",
+                    "spice": "${form.spice}",
+                    "salt": "${form.salt}",
+                    "sweet": "${form.sweet}",
+                    "note": "${form.note}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ORDER_DETAILS",
+      "title": "Order Details",
+      "data": {
+        "bill_summary": { "type": "string", "__example__": "Total: ₹350" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "order_form",
+            "children": [
+              {
+                "type": "TextBody",
+                "text": "${data.bill_summary}"
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "name": "order_type",
+                "label": "Order kaise chahiye?",
+                "data-source": [
+                  { "id": "dine_in", "title": "Dine-in" },
+                  { "id": "delivery", "title": "Delivery" },
+                  { "id": "takeaway", "title": "Takeaway" }
+                ]
+              },
+              {
+                "type": "TextInput",
+                "name": "table_number",
+                "label": "Table number (agar Dine-in)",
+                "required": false,
+                "visible": "${form.order_type} = 'dine_in'"
+              },
+              {
+                "type": "TextInput",
+                "name": "address",
+                "label": "Delivery address (agar Delivery)",
+                "required": false,
+                "visible": "${form.order_type} = 'delivery'"
+              },
+              {
+                "type": "Footer",
+                "label": "Review Order",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "trigger": "order_details_next",
+                    "order_type": "${form.order_type}",
+                    "table_number": "${form.table_number}",
+                    "address": "${form.address}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "CONFIRM",
+      "title": "Confirm Order",
+      "terminal": true,
+      "data": {
+        "final_summary": { "type": "string", "__example__": "🧾 ... Total: ₹350" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "confirm_form",
+            "children": [
+              {
+                "type": "TextBody",
+                "text": "${data.final_summary}"
+              },
+              {
+                "type": "Footer",
+                "label": "Confirm Order",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "trigger": "confirm_order"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

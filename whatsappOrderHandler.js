@@ -1,6 +1,6 @@
 // whatsappOrderHandler.js
 const admin = require("firebase-admin");
-const { sendText, sendButtons, sendImage, sendProductList } = require("./whatsappOrderBot");
+const { sendText, sendButtons, sendImage, sendProductList, sendWhatsAppMessage } = require("./whatsappOrderBot");
 const { getFirestore } = require("firebase-admin/firestore");
 
 // ★ CHANGED — ab dish ka taste profile bhi laata hai (spice/salt/sweet/salad options decide karne ke liye)
@@ -279,22 +279,37 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     }
 
     const orderId = `wa_${Date.now()}`;
-    const customizePlan = lines.map((l) => getCustomizationSteps(l));
 
     await sessionRef.set({
-      state: "customizing",
+      state: "flow_customizing",
       orderId,
       items: lines,
       subtotal,
       discount: 0,
       createdAt: Date.now(),
-      customizePlan,
-      customizeItemIdx: 0,
-      customizeStepIdx: 0,
+      flowItemIdx: 0,
     });
 
-    await sendText(phoneNumberId, from, "Bas thodi si detail chahiye har item ke liye 🙏");
-    await askCurrentQuestion(db, phoneNumberId, from, restaurantId, sessionRef);
+    const flowToken = Buffer.from(JSON.stringify({ restaurantId, from })).toString("base64");
+    await sendWhatsAppMessage(phoneNumberId, {
+      to: from,
+      type: "interactive",
+      interactive: {
+        type: "flow",
+        body: { text: "Bas 1 minute — order customize kar lo:" },
+        action: {
+          name: "flow",
+          parameters: {
+            flow_message_version: "3",
+            flow_token: flowToken,
+            flow_id: process.env.KHAATOGO_ORDER_FLOW_ID,
+            flow_cta: "Order Customize Karo",
+            flow_action: "navigate",
+            flow_action_payload: { screen: "ITEM_CUSTOMIZE" },
+          },
+        },
+      },
+    });
     return;
   }
 
@@ -659,4 +674,4 @@ async function sessionRef_remove(db, restaurantId, from) {
   await db.ref(`whatsappSessions/${restaurantId}/${from}`).remove();
 }
 
-module.exports = { handleIncomingMessage };
+module.exports = { handleIncomingMessage, billSummaryText };

@@ -278,8 +278,11 @@ app.get("/catalog-feed/:restaurantId.csv", async (req, res) => {
     res.status(500).send("Error generating feed");
   }
 });
-const { handleIncomingMessage } = require("./whatsappOrderHandler"); // ★ NEW
 
+const { handleIncomingMessage } = require("./whatsappOrderHandler"); // ★ NEW
+const { decryptRequest, encryptResponse } = require("./Flowendpoint"); // ★ NEW
+const { handleFlowDataExchange } = require("./flowOrderLogic"); // ★ NEW
+const { sendButtons } = require("./whatsappOrderBot"); // ★ NEW
 const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN; // ★ NEW
 
 // ══════════════════════════════════════════
@@ -294,7 +297,20 @@ app.get("/webhook/whatsapp", (req, res) => {
   }
   res.sendStatus(403);
 });
-
+// ══════════════════════════════════════════
+// ★ NEW: WhatsApp Flow ka data-exchange endpoint (encrypted)
+// ══════════════════════════════════════════
+app.post("/webhook/whatsapp-flow", async (req, res) => {
+  try {
+    const { decryptedBody, aesKey, ivBuffer } = decryptRequest(req.body, process.env.FLOW_PRIVATE_KEY);
+    const { restaurantId, from } = JSON.parse(Buffer.from(decryptedBody.flow_token, "base64").toString());
+    const responseData = await handleFlowDataExchange(db, restaurantId, from, decryptedBody);
+    res.send(encryptResponse(responseData, aesKey, ivBuffer));
+  } catch (e) {
+    console.error("Flow data-exchange error:", e);
+    res.status(500).send("Flow processing failed");
+  }
+});
 // ══════════════════════════════════════════
 // ★ NEW: Customer ke WhatsApp messages/orders yahan aate hain
 // ══════════════════════════════════════════
@@ -311,6 +327,17 @@ const restaurantId = mapSnap.val();
 console.log(`📱 WhatsApp msg — phoneNumberId: ${phoneNumberId} → restaurantId: ${restaurantId}`); // ★ NEW
 if (!restaurantId) {
       console.log("Unknown phoneNumberId:", phoneNumberId);
+      return;
+    }
+
+    // ★ NEW — Flow complete hone par (Confirm Order dabane par) yahan aata hai
+    if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
+      const sessionRef = db.ref(`whatsappSessions/${restaurantId}/${message.from}`);
+      await sessionRef.update({ state: "awaiting_payment_method" });
+      await sendButtons(phoneNumberId, message.from, "Payment kaise karenge?", [
+        { id: "pay_upi", title: "Pay via UPI" },
+        { id: "pay_cod", title: "Cash on Delivery" },
+      ]);
       return;
     }
 
