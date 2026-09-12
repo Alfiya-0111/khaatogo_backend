@@ -346,6 +346,51 @@ if (!restaurantId) {
     console.error("WhatsApp webhook error:", e);
   }
 });
+const { proceedToOrderTypeOrCoupon } = require("./whatsappOrderHandler"); // ★ NEW import (top mein add karo)
+
+// ══════════════════════════════════════════
+// ★ NEW: Web customize page se submit hone par yahan aata hai
+// ══════════════════════════════════════════
+app.post("/customize-order-submit", async (req, res) => {
+  try {
+    const { restaurantId, orderId, items } = req.body;
+    if (!restaurantId || !orderId || !Array.isArray(items)) {
+      return res.status(400).json({ error: "Invalid request" });
+    }
+
+    const draftRef = db.ref(`orderDrafts/${restaurantId}/${orderId}`);
+    const draftSnap = await draftRef.once("value");
+    const draft = draftSnap.val();
+    if (!draft) return res.status(404).json({ error: "Order draft not found ya expire ho chuka hai" });
+
+    // ★ Security: price/name/dishId original draft se hi lo, sirf preferences client se lo
+    const mergedItems = draft.items.map((orig, idx) => {
+      const sub = items[idx] || {};
+      return {
+        ...orig,
+        spicePreference: sub.spicePreference || "normal",
+        saltPreference: sub.saltPreference || "normal",
+        sweetLevel: sub.sweetLevel || "normal",
+        salad: sub.salad || { qty: 0, taste: "normal" },
+        specialInstructions: String(sub.specialInstructions || "").slice(0, 200),
+      };
+    });
+
+    await draftRef.update({ items: mergedItems, status: "customized", customizedAt: Date.now() });
+
+    const { phoneNumberId, from } = draft;
+    const sessionRef = db.ref(`whatsappSessions/${restaurantId}/${from}`);
+    await sessionRef.update({ state: "collected", items: mergedItems });
+
+    // ★ Yahin se WhatsApp par agla message chala jayega (bill summary + order type)
+    await proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId, sessionRef);
+
+    res.json({ status: "ok" });
+  } catch (e) {
+    console.error("customize-order-submit error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 const { createRestaurantCatalog } = require("./createRestaurantCatalog");
 
 // ══════════════════════════════════════════

@@ -83,6 +83,19 @@ async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
     sections
   );
 }
+// ★ NEW — Customer ka saved delivery address check karo
+async function getSavedAddress(db, restaurantId, phone) {
+  const snap = await db.ref(`customerProfiles/${restaurantId}/${phone}/address`).once("value");
+  return snap.val() || null;
+}
+
+// ★ NEW — Address save karo taaki agli baar poochna na pade
+async function saveCustomerAddress(db, restaurantId, phone, address) {
+  await db.ref(`customerProfiles/${restaurantId}/${phone}`).update({
+    address,
+    updatedAt: Date.now(),
+  });
+}
 
 // ── Coupon logic (unchanged) ──
 async function applyCoupon(db, restaurantId, code, subtotal) {
@@ -236,6 +249,7 @@ function buildPreferenceGroups(items) {
 }
 
 const MID_FLOW_STATES = [
+  "awaiting_web_customize",  
   "awaiting_coupon_code", "awaiting_table", "awaiting_address",
   "awaiting_order_type", "awaiting_payment_method", "awaiting_confirm",
   "awaiting_coupon_choice", "awaiting_customize_choice",       // ★ NEW
@@ -262,7 +276,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
   // ══════════════════════════════════════════
   // 1) Customer ne cart order bheja
   // ══════════════════════════════════════════
-  if (message.type === "order") {
+if (message.type === "order") {
     const order = message.order;
     const rawItems = order.product_items || [];
 
@@ -291,27 +305,32 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     }
 
     const orderId = `wa_${Date.now()}`;
-    const prefGroups = buildPreferenceGroups(lines); // ★ NEW
+
+    // ★ NEW: draft save karo — web page isi se items padhega
+    await db.ref(`orderDrafts/${restaurantId}/${orderId}`).set({
+      items: lines,
+      subtotal,
+      phoneNumberId,
+      from,
+      restaurantId,
+      status: "awaiting_customize",
+      createdAt: Date.now(),
+    });
 
     await sessionRef.set({
-      state: "awaiting_customize_choice", // ★ CHANGED
+      state: "awaiting_web_customize",
       orderId,
-      items: lines,
       subtotal,
       discount: 0,
       createdAt: Date.now(),
-      prefGroups,     // ★ NEW
-      prefGroupIdx: 0, // ★ NEW
-      prefStepIdx: 0,  // ★ NEW
-      noteItemIdx: 0,  // ★ NEW
     });
 
-    // ★ NEW — sabse pehla sawaal: quick ya customize
-    await sendText(phoneNumberId, from, billSummaryText(lines, subtotal, 0, null));
-    await sendButtons(phoneNumberId, from, "Order customize karni hai ya sab normal (jaldi) rakhein?", [
-      { id: "customize_quick", title: "Sab Normal" },
-      { id: "customize_start", title: "Customize Karo" },
-    ]);
+    const link = `https://khaatogo.com/customize/${restaurantId}/${orderId}`;
+    await sendText(
+      phoneNumberId,
+      from,
+      `🧾 Aapka order mila!\nApna order customize karne ke liye (spice, salt, notes) is link pe jaao:\n${link}\n\nSubmit karte hi hum aage badhenge.`
+    );
     return;
   }
 
@@ -378,11 +397,25 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       await sendText(phoneNumberId, from, "Table number bhejo (agar pata nahi to 'skip' likho):");
       return;
     }
-    if (buttonId === "type_delivery") {
-      await sessionRef.update({ state: "awaiting_address", orderType: "delivery" });
-      await sendText(phoneNumberId, from, "📍 Delivery address type karke bhejo (pura address ek message mein):");
-      return;
-    }
+   if (buttonId === "type_delivery") {
+  const savedAddress = await getSavedAddress(db, restaurantId, from);
+
+  if (savedAddress) {
+    // ★ Purana customer — saved address seedha use karo, poochna skip
+    await sessionRef.update({ state: "awaiting_confirm", orderType: "delivery", address: savedAddress });
+    await sendText(
+      phoneNumberId,
+      from,
+      `📍 Aapka saved address use kiya ja raha hai:\n${savedAddress}`
+    );
+    await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
+  } else {
+    // ★ Naya customer — address poocho
+    await sessionRef.update({ state: "awaiting_address", orderType: "delivery" });
+    await sendText(phoneNumberId, from, "📍 Delivery address type karke bhejo (pura address ek message mein):");
+  }
+  return;
+}
     if (buttonId === "type_takeaway") {
       await sessionRef.update({ state: "awaiting_confirm", orderType: "takeaway" });
       await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
@@ -464,11 +497,16 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       return;
     }
 
-    if (session.state === "awaiting_address") {
-      await sessionRef.update({ state: "awaiting_confirm", address: message.text.body });
-      await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
-      return;
-    }
+   if (session.state === "awaiting_address") {
+  const address = message.text.body.trim();
+  await sessionRef.update({ state: "awaiting_confirm", address });
+
+  // ★ NEW — future orders ke liye save kar do
+  await saveCustomerAddress(db, restaurantId, from, address);
+
+  await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
+  return;
+}
   }
 }
 
@@ -699,4 +737,4 @@ async function sessionRef_remove(db, restaurantId, from) {
   await db.ref(`whatsappSessions/${restaurantId}/${from}`).remove();
 }
 
-module.exports = { handleIncomingMessage };
+module.exports = { handleIncomingMessage, proceedToOrderTypeOrCoupon };
