@@ -5,7 +5,7 @@
 // ★ Field names purane system se match karte hain: spicePreference,
 // saltPreference, sweetLevel, specialInstructions — taaki finalizeOrder()
 // aur admin/KDS panel bina kisi change ke inhe padh sakein.
-const { billSummaryText } = require("./whatsappOrderHandler");
+const { billSummaryText } = require("./billUtils");
 
 function needsCustomization(item) {
   return item.dishTasteProfile === "spicy" || (item.dishTasteProfile === "sweet" && item.sugarLevelEnabled);

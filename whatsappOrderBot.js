@@ -73,5 +73,29 @@ function sendProductList(phoneNumberId, to, catalogId, headerText, bodyText, sec
     },
   });
 }
+// ★ NEW — WhatsApp Flow open karne wala interactive message
+function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, screen, screenData) {
+  return sendWhatsAppMessage(phoneNumberId, {
+    to,
+    type: "interactive",
+    interactive: {
+      type: "flow",
+      header: { type: "text", text: headerText },
+      body: { text: bodyText },
+      footer: { text: "Neeche button dabao" },
+      action: {
+        name: "flow",
+        parameters: {
+          flow_message_version: "3",
+          flow_token: flowToken,
+          flow_id: process.env.WHATSAPP_FLOW_ID,
+          flow_cta: "Order Customize Karo",
+          flow_action: "navigate",
+          flow_action_payload: { screen, data: screenData },
+        },
+      },
+    },
+  });
+}
 
-module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList }; // ★ sendProductList add
+module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage };

@@ -1,6 +1,8 @@
 // whatsappOrderHandler.js
 const admin = require("firebase-admin");
-const { sendText, sendButtons, sendImage, sendProductList } = require("./whatsappOrderBot");
+const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage } = require("./whatsappOrderBot");
+const { billSummaryText } = require("./billUtils");
+const { buildInitialScreenData } = require("./flowOrderLogic");
 const { getFirestore } = require("firebase-admin/firestore");
 
 async function getDishDetails(db, restaurantId, dishId) {
@@ -138,26 +140,7 @@ async function hasActiveCoupon(db, restaurantId) {
   });
 }
 
-function billSummaryText(lines, subtotal, discount, couponCode) {
-  const itemsText = lines.map((l) => {
-    let line = `${l.qty} x ${l.name} = ₹${l.lineTotal.toFixed(2)}`;
-    const tags = [];
-    if (l.dishTasteProfile !== "sweet" && l.spicePreference && l.spicePreference !== "normal") tags.push(`🌶️ ${l.spicePreference}`);
-    if (l.dishTasteProfile === "sweet" && l.sweetLevel && l.sweetLevel !== "normal") tags.push(`🍯 ${l.sweetLevel}`);
-    if (l.saltPreference && l.saltPreference !== "normal") tags.push(`🧂 ${l.saltPreference}`);
-    if (l.salad?.qty > 0) tags.push(`🥗 Salad`);
-    if (tags.length) line += `\n   (${tags.join(", ")})`;
-    if (l.specialInstructions) line += `\n   📝 ${l.specialInstructions}`;
-    return line;
-  }).join("\n");
-  let text = `🧾 Aapka order:\n${itemsText}\n\nSubtotal: ₹${subtotal.toFixed(2)}`;
-  if (discount > 0) {
-    text += `\n🏷️ Coupon (${couponCode}): −₹${discount.toFixed(2)}`;
-  }
-  const total = subtotal - discount;
-  text += `\n\n*Total: ₹${total.toFixed(2)}*`;
-  return text;
-}
+
 
 async function decrementStockForOrder(db, restaurantId, items) {
   const { getFirestore } = require("firebase-admin/firestore");
@@ -250,6 +233,7 @@ function buildPreferenceGroups(items) {
 }
 
 const MID_FLOW_STATES = [
+   "in_flow",
   "awaiting_coupon_code", "awaiting_table", "awaiting_address",
   "awaiting_order_type", "awaiting_payment_method", "awaiting_confirm",
   "awaiting_coupon_choice", "awaiting_customize_choice",
@@ -304,27 +288,23 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       });
     }
 
-    const orderId = `wa_${Date.now()}`;
-    const prefGroups = buildPreferenceGroups(lines);
+       const orderId = `wa_${Date.now()}`;
 
     await sessionRef.set({
-      state: "awaiting_customize_choice",
-      orderId,
-      items: lines,
-      subtotal,
-      discount: 0,
-      createdAt: Date.now(),
-      prefGroups,
-      prefGroupIdx: 0,
-      prefStepIdx: 0,
-      noteItemIdx: 0,
+      state: "in_flow",
+      orderId, items: lines, subtotal, discount: 0,
+      createdAt: Date.now(), flowItemIdx: 0,
     });
 
-    await sendText(phoneNumberId, from, billSummaryText(lines, subtotal, 0, null));
-    await sendButtons(phoneNumberId, from, "Order customize karni hai ya sab normal (jaldi) rakhein?", [
-      { id: "customize_quick", title: "Sab Normal" },
-      { id: "customize_start", title: "Customize Karo" },
-    ]);
+    const flowToken = `${restaurantId}|${from}`;
+    const initial = await buildInitialScreenData({ items: lines, subtotal, flowItemIdx: 0 });
+
+    await sendFlowMessage(
+      phoneNumberId, from, flowToken,
+      "Order Customize Karo",
+      billSummaryText(lines, subtotal, 0, null),
+      initial.screen, initial.data
+    );
     return;
   }
 
@@ -350,7 +330,17 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       }
       return;
     }
-
+  if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
+    const responseJson = JSON.parse(message.interactive.nfm_reply.response_json || "{}");
+    if (responseJson.trigger === "confirm_order") {
+      await sessionRef.update({ state: "awaiting_payment_method" });
+      await sendButtons(phoneNumberId, from, "Payment kaise karenge?", [
+        { id: "pay_upi", title: "Pay via UPI" },
+        { id: "pay_cod", title: "Cash on Delivery" },
+      ]);
+    }
+    return;
+  }
     if (["awaiting_spice", "awaiting_salt", "awaiting_sweet", "awaiting_salad"].includes(session.state)) {
       await handlePrefGroupButton(db, phoneNumberId, from, restaurantId, sessionRef, session, buttonId);
       return;
