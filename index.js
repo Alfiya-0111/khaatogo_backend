@@ -9,6 +9,7 @@ const multer = require("multer");        // ★ NEW
 const axios = require("axios");          // ★ NEW
 const FormData = require("form-data");   
 const { setupAbsentJob } = require("./markAbsentJob");
+// ? hh
 const { setupCatalogSync, upsertCatalogItem } = require("./catalogSync");
 
 // ── Firebase Admin init ──
