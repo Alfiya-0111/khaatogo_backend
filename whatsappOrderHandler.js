@@ -2,7 +2,7 @@
 const admin = require("firebase-admin");
 const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage } = require("./whatsappOrderBot");
 const { billSummaryText } = require("./billUtils");
-const { buildInitialScreenData } = require("./flowOrderLogic");
+
 const { getFirestore } = require("firebase-admin/firestore");
 
 async function getDishDetails(db, restaurantId, dishId) {
@@ -195,42 +195,7 @@ async function decrementStockForOrder(db, restaurantId, items) {
 }
 
 // dish ke taste profile ke hisaab se decide karo kaunse customization steps chahiye
-function getCustomizationSteps(item) {
-  const steps = [];
-  if (item.dishTasteProfile === "spicy") {
-    steps.push("spice");
-    if (item.saltLevelEnabled) steps.push("salt");
-    if (item.saladConfig?.enabled) steps.push("salad");
-  } else if (item.dishTasteProfile === "sweet") {
-    if (item.sugarLevelEnabled) steps.push("sweet");
-  }
-  steps.push("note");
-  return steps;
-}
 
-// same customization-requirement wale items ek group mein daalo,
-// taaki spice/salt/sweet sirf EK BAAR poocha jaye poore group ke liye
-function buildPreferenceGroups(items) {
-  const groups = [];
-  const keyToGroupIdx = {};
-
-  items.forEach((item, idx) => {
-    const allSteps = getCustomizationSteps(item);
-    const prefSteps = allSteps.filter((s) => s !== "note");
-    if (prefSteps.length === 0) return;
-
-    const key = `${item.dishTasteProfile}|${prefSteps.join(",")}`;
-    if (keyToGroupIdx[key] === undefined) {
-      keyToGroupIdx[key] = groups.length;
-      groups.push({ key, steps: prefSteps, itemIndices: [], names: [] });
-    }
-    const g = groups[keyToGroupIdx[key]];
-    g.itemIndices.push(idx);
-    g.names.push(item.name);
-  });
-
-  return groups;
-}
 
 const MID_FLOW_STATES = [
    "in_flow",
@@ -291,20 +256,16 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
        const orderId = `wa_${Date.now()}`;
 
     await sessionRef.set({
-      state: "in_flow",
+      state: "awaiting_customize_choice",
       orderId, items: lines, subtotal, discount: 0,
-      createdAt: Date.now(), flowItemIdx: 0,
+      createdAt: Date.now(),
     });
 
-    const flowToken = `${restaurantId}|${from}`;
-    const initial = await buildInitialScreenData({ items: lines, subtotal, flowItemIdx: 0 });
-
-    await sendFlowMessage(
-      phoneNumberId, from, flowToken,
-      "Order Customize Karo",
-      billSummaryText(lines, subtotal, 0, null),
-      initial.screen, initial.data
-    );
+    await sendText(phoneNumberId, from, billSummaryText(lines, subtotal, 0, null));
+    await sendButtons(phoneNumberId, from, "Order customize karni hai ya sab normal (jaldi) rakhein?", [
+      { id: "customize_quick", title: "Sab Normal" },
+      { id: "customize_start", title: "Customize Karo" },
+    ]);
     return;
   }
 
@@ -317,16 +278,19 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     const session = snap.val();
     if (!session) return;
 
-    if (session.state === "awaiting_customize_choice") {
+       if (session.state === "awaiting_customize_choice") {
       if (buttonId === "customize_quick") {
-        await sessionRef.update({ state: "awaiting_note_gate" });
-        await sendButtons(phoneNumberId, from, "📝 Kisi item mein special instruction chahiye? (jaise: no onion, less oil)", [
-          { id: "note_gate_yes", title: "Haan, batani hai" },
-          { id: "note_gate_no", title: "Nahi, skip" },
-        ]);
+        await sessionRef.update({ state: "collected" });
+        await proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId, sessionRef);
       } else if (buttonId === "customize_start") {
-        await sessionRef.update({ state: "collecting_prefs" });
-        await askNextStep(db, phoneNumberId, from, restaurantId, sessionRef);
+        await sessionRef.update({ state: "in_flow" });
+        const flowToken = `${restaurantId}|${from}`;
+        const billText = billSummaryText(session.items, session.subtotal, 0, null);
+        await sendFlowMessage(
+          phoneNumberId, from, flowToken,
+          "Order Customize Karo", billText,
+          "DETAILS", { bill_summary: billText }
+        );
       }
       return;
     }
@@ -485,110 +449,10 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
   }
 }
 
-// pref-groups aur notes dono handle karta hai
-async function askNextStep(db, phoneNumberId, from, restaurantId, sessionRef) {
-  const snap = await sessionRef.once("value");
-  const session = snap.val();
-  if (!session) return;
 
-  if (session.state === "collecting_prefs") {
-    const { prefGroups } = session;
-    let groupIdx = session.prefGroupIdx;
-    let stepIdx = session.prefStepIdx;
-
-    if (groupIdx >= prefGroups.length) {
-      await sessionRef.update({ state: "awaiting_note_gate" });
-      await sendButtons(phoneNumberId, from, "📝 Kisi item mein special instruction chahiye? (jaise: no onion, less oil)", [
-        { id: "note_gate_yes", title: "Haan, batani hai" },
-        { id: "note_gate_no", title: "Nahi, skip" },
-      ]);
-      return;
-    }
-
-    const group = prefGroups[groupIdx];
-    if (stepIdx >= group.steps.length) {
-      groupIdx += 1;
-      stepIdx = 0;
-      await sessionRef.update({ prefGroupIdx: groupIdx, prefStepIdx: stepIdx });
-      return askNextStep(db, phoneNumberId, from, restaurantId, sessionRef);
-    }
-
-    const step = group.steps[stepIdx];
-    const label = group.itemIndices.length > 1
-      ? `*${group.names.join(", ")}* (${group.itemIndices.length} items)`
-      : `*${group.names[0]}*`;
-
-    if (step === "spice") {
-      await sessionRef.update({ state: "awaiting_spice" });
-      await sendButtons(phoneNumberId, from, `${label}\n🌶️ Spice level kitna chahiye?`, [
-        { id: "spice_normal", title: "Normal" },
-        { id: "spice_medium", title: "Medium" },
-        { id: "spice_spicy", title: "Spicy" },
-      ]);
-      return;
-    }
-    if (step === "salt") {
-      await sessionRef.update({ state: "awaiting_salt" });
-      await sendButtons(phoneNumberId, from, `${label}\n🧂 Salt kitna chahiye?`, [
-        { id: "salt_normal", title: "Normal" },
-        { id: "salt_medium", title: "Medium" },
-        { id: "salt_extra", title: "Extra" },
-      ]);
-      return;
-    }
-    if (step === "sweet") {
-      await sessionRef.update({ state: "awaiting_sweet" });
-      await sendButtons(phoneNumberId, from, `${label}\n🍯 Sweetness kitni chahiye?`, [
-        { id: "sweet_less", title: "Less" },
-        { id: "sweet_normal", title: "Normal" },
-        { id: "sweet_extra", title: "Extra" },
-      ]);
-      return;
-    }
-    if (step === "salad") {
-      await sessionRef.update({ state: "awaiting_salad" });
-      await sendButtons(phoneNumberId, from, `${label}\n🥗 Salad add karna hai?`, [
-        { id: "salad_yes", title: "Yes" },
-        { id: "salad_no", title: "No" },
-      ]);
-      return;
-    }
-  }
-
-  if (session.state === "collecting_notes") {
-    const { items } = session;
-    const idx = session.noteItemIdx;
-    if (idx >= items.length) {
-      await sessionRef.update({ state: "collected" });
-      await proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId, sessionRef);
-      return;
-    }
-    await sessionRef.update({ state: "awaiting_note_text" });
-    await sendText(phoneNumberId, from, `📝 *${items[idx].name}* ke liye special instruction? (nahi chahiye to 'skip' likho)`);
-    return;
-  }
-}
 
 // group ka jawaab poore group ke saare items pe ek saath apply karo
-async function handlePrefGroupButton(db, phoneNumberId, from, restaurantId, sessionRef, session, buttonId) {
-  const items = [...session.items];
-  const group = session.prefGroups[session.prefGroupIdx];
-  let value = null;
 
-  if (session.state === "awaiting_spice") value = { field: "spicePreference", val: buttonId.replace("spice_", "") };
-  else if (session.state === "awaiting_salt") value = { field: "saltPreference", val: buttonId.replace("salt_", "") };
-  else if (session.state === "awaiting_sweet") value = { field: "sweetLevel", val: buttonId.replace("sweet_", "") };
-  else if (session.state === "awaiting_salad") value = { field: "salad", val: { qty: buttonId === "salad_yes" ? 1 : 0, taste: "normal" } };
-
-  if (value) {
-    group.itemIndices.forEach((idx) => {
-      items[idx] = { ...items[idx], [value.field]: value.val };
-    });
-  }
-
-  await sessionRef.update({ items, prefStepIdx: session.prefStepIdx + 1, state: "collecting_prefs" });
-  await askNextStep(db, phoneNumberId, from, restaurantId, sessionRef);
-}
 
 async function proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId, sessionRef) {
   const snap = await sessionRef.once("value");
@@ -654,6 +518,7 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     discount: session.discount || 0,
     couponCode: session.couponCode || null,
     total,
+        customerNote: session.note || null,
     orderType: session.orderType,
     tableNumber: session.tableNumber || null,
     address: session.address || null,
