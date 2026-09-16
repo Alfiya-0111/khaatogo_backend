@@ -300,9 +300,29 @@ app.get("/webhook/whatsapp", (req, res) => {
   res.sendStatus(403);
 });
 // ══════════════════════════════════════════
+  const { decryptRequest, encryptResponse } = require("./Flowendpoint"); 
 // ★ NEW: WhatsApp Flow ka data-exchange endpoint (encrypted)
-// ══════════════════════════════════════════
 
+// ══════════════════════════════════════════
+   app.post("/webhook/whatsapp-flow", async (req, res) => {
+     try {
+       const privatePem = process.env.PRIVATE_KEY;
+       const { decryptedBody, aesKey, ivBuffer } = decryptRequest(req.body, privatePem);
+
+       let responseObj;
+       if (decryptedBody.action === "ping") {
+         responseObj = { data: { status: "active" } };
+       } else {
+         responseObj = { screen: "SUCCESS", data: {} };
+       }
+
+       const encrypted = encryptResponse(responseObj, aesKey, ivBuffer);
+       res.send(encrypted);
+     } catch (e) {
+       console.error("Flow endpoint error:", e);
+       res.sendStatus(432);
+     }
+   });
 // ══════════════════════════════════════════
 // ★ NEW: Customer ke WhatsApp messages/orders yahan aate hain
 // ══════════════════════════════════════════
