@@ -9,6 +9,7 @@ const multer = require("multer");        // ★ NEW
 const axios = require("axios");          // ★ NEW
 const FormData = require("form-data");   
 const { setupAbsentJob } = require("./markAbsentJob");
+const Settingstproutes = require("./Settingstproutes");
 // ? hh
 const { setupCatalogSync, upsertCatalogItem } = require("./catalogSync");
 
@@ -159,6 +160,7 @@ app.post("/webhook/kronos", async (req, res) => {
 // warna neeche wale routes mein req.body undefined milega
 // ══════════════════════════════════════════
 app.use(express.json());
+app.use(Settingstproutes(db));
 // ★ NEW: Multer setup — file uploads memory mein handle karega
 // ══════════════════════════════════════════
 const upload = multer({
