@@ -294,7 +294,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       }
       return;
     }
-  if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
+if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
     const responseJson = JSON.parse(message.interactive.nfm_reply.response_json || "{}");
     if (responseJson.trigger === "confirm_order") {
       await sessionRef.update({ state: "awaiting_payment_method" });
@@ -302,6 +302,9 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
         { id: "pay_upi", title: "Pay via UPI" },
         { id: "pay_cod", title: "Cash on Delivery" },
       ]);
+    } else if (responseJson.trigger === "cancel_order") {
+      await sessionRef.remove();
+      await sendText(phoneNumberId, from, "❌ Order cancel kar diya gaya. Naya order shuru karne ke liye phir se catalog se items bhejo.");
     }
     return;
   }
@@ -551,23 +554,28 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     return;
   }
 
-  const qr = await razorpay.qrCode.create({
-    type: "upi_qr",
-    name: `Khaatogo Order ${orderId}`,
-    usage: "single_use",
-    fixed_amount: true,
-    payment_amount: Math.round(total * 100),
-    description: `Khaatogo Order ${orderId}`,
-    notes: { restaurantId, orderId, source: "whatsapp" },
-  });
+  // ★ NEW: Razorpay QR ki jagah restaurant ki apni UPI ID se QR
+  const restSnap = await db.ref(`restaurants/${restaurantId}`).once("value");
+  const restData = restSnap.val() || {};
+  const upiId = restData.payment?.upiId;
+  const restaurantName = restData.name || "Restaurant";
 
-  await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
-  await db.ref(`orders/${restaurantId}/${orderId}`).update({ razorpayQrCodeId: qr.id });
+  if (!upiId) {
+    await sendText(
+      phoneNumberId,
+      from,
+      `❌ UPI payment abhi setup nahi hai. Cash on Delivery choose karo, ya restaurant se contact karo.`
+    );
+    return;
+  }
+
+  const upiUrl = `upi://pay?pa=${upiId}&pn=${encodeURIComponent(restaurantName)}&am=${total.toFixed(2)}&cu=INR&tn=${encodeURIComponent("Order " + orderId)}`;
+  const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(upiUrl)}`;
 
   await sendImage(
     phoneNumberId,
     from,
-    qr.image_url,
+    qrImageUrl,
     `💳 Scan karke ₹${total.toFixed(2)} pay karo\nOrder ID: ${orderId}${readyLine}`
   );
 }
