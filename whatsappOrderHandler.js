@@ -270,7 +270,26 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
   }
 
   // ══════════════════════════════════════════
-  // 2) Button replies
+  // 2) WhatsApp Flow (nfm_reply) — button_reply se ALAG, apna independent check
+  // ══════════════════════════════════════════
+  if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
+    const responseJson = JSON.parse(message.interactive.nfm_reply.response_json || "{}");
+    const snap = await sessionRef.once("value");
+    const session = snap.val();
+    if (!session) return;
+
+    if (responseJson.trigger === "confirm_order") {
+      await sessionRef.update({ state: "awaiting_confirm" });
+      await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
+    } else if (responseJson.trigger === "cancel_order") {
+      await sessionRef.remove();
+      await sendText(phoneNumberId, from, "❌ Order cancel kar diya gaya. Naya order shuru karne ke liye phir se catalog se items bhejo.");
+    }
+    return;
+  }
+
+  // ══════════════════════════════════════════
+  // 3) Button replies
   // ══════════════════════════════════════════
   if (message.type === "interactive" && message.interactive?.type === "button_reply") {
     const buttonId = message.interactive.button_reply.id;
@@ -294,17 +313,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       }
       return;
     }
-if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
-    const responseJson = JSON.parse(message.interactive.nfm_reply.response_json || "{}");
-    if (responseJson.trigger === "confirm_order") {
-      await sessionRef.update({ state: "awaiting_confirm" });
-      await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
-    } else if (responseJson.trigger === "cancel_order") {
-      await sessionRef.remove();
-      await sendText(phoneNumberId, from, "❌ Order cancel kar diya gaya. Naya order shuru karne ke liye phir se catalog se items bhejo.");
-    }
-    return;
-  }
+
     if (["awaiting_spice", "awaiting_salt", "awaiting_sweet", "awaiting_salad"].includes(session.state)) {
       await handlePrefGroupButton(db, phoneNumberId, from, restaurantId, sessionRef, session, buttonId);
       return;
