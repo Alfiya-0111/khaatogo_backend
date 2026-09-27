@@ -303,6 +303,8 @@ app.get("/webhook/whatsapp", (req, res) => {
 });
 // ══════════════════════════════════════════
 const { decryptRequest, encryptResponse } = require("./flowEndpoint");
+const { handleFlowDataExchange } = require("./flowOrderLogic");
+
 // ★ NEW: WhatsApp Flow ka data-exchange endpoint (encrypted)
 
 // ══════════════════════════════════════════
@@ -315,7 +317,9 @@ app.post("/webhook/whatsapp-flow", async (req, res) => {
     if (decryptedBody.action === "ping") {
       responseObj = { data: { status: "active" } };
     } else {
-      responseObj = { screen: "SUCCESS", data: {} };
+      const flowToken = decryptedBody.flow_token || "";
+      const [restaurantId, from] = flowToken.split("|");
+      responseObj = await handleFlowDataExchange(db, restaurantId, from, decryptedBody);
     }
 
     const encrypted = encryptResponse(responseObj, aesKey, ivBuffer);
