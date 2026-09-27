@@ -297,11 +297,8 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
 if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
     const responseJson = JSON.parse(message.interactive.nfm_reply.response_json || "{}");
     if (responseJson.trigger === "confirm_order") {
-      await sessionRef.update({ state: "awaiting_payment_method" });
-      await sendButtons(phoneNumberId, from, "Payment kaise karenge?", [
-        { id: "pay_upi", title: "Pay via UPI" },
-        { id: "pay_cod", title: "Cash on Delivery" },
-      ]);
+      await sessionRef.update({ state: "awaiting_confirm" });
+      await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
     } else if (responseJson.trigger === "cancel_order") {
       await sessionRef.remove();
       await sendText(phoneNumberId, from, "❌ Order cancel kar diya gaya. Naya order shuru karne ke liye phir se catalog se items bhejo.");
