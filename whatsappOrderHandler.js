@@ -278,7 +278,30 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     const session = snap.val();
     if (!session) return;
 
-    if (responseJson.trigger === "confirm_order") {
+       if (responseJson.trigger === "confirm_order") {
+      // ★ Delivery ho to address handle karo
+      if (session.orderType === "delivery") {
+        const flowAddress = (session.address || "").trim();
+
+        if (flowAddress) {
+          // flow mein naya address bhara hai -> save kar lo (agli baar ke liye)
+          await saveCustomerAddress(db, restaurantId, from, flowAddress);
+        } else {
+          // flow mein khaali chhoda -> purana saved address lo
+          const savedAddress = await getSavedAddress(db, restaurantId, from);
+
+          if (savedAddress) {
+            await sessionRef.update({ address: savedAddress });
+            await sendText(phoneNumberId, from, `📍 Aapka saved address use kiya ja raha hai:\n${savedAddress}`);
+          } else {
+            // saved bhi nahi hai -> chat mein maang lo
+            await sessionRef.update({ state: "awaiting_address" });
+            await sendText(phoneNumberId, from, "📍 Delivery address type karke bhejo (pura address ek message mein):");
+            return;
+          }
+        }
+      }
+
       await sessionRef.update({ state: "awaiting_confirm" });
       await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
     } else if (responseJson.trigger === "cancel_order") {

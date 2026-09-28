@@ -19,17 +19,26 @@ async function handleFlowDataExchange(db, restaurantId, from, decryptedBody) {
 
   if (trigger === "details_next") {
     const { note, order_type, table_number, address } = decryptedBody.data;
+
+    // ★ Delivery mein address khaali ho to saved address uthao
+    let finalAddress = (address || "").trim() || null;
+    if (order_type === "delivery" && !finalAddress) {
+      const addrSnap = await db.ref(`customerProfiles/${restaurantId}/${from}/address`).once("value");
+      finalAddress = addrSnap.val() || null;
+    }
+
     await sessionRef.update({
       note: note || "",
       orderType: order_type,
       tableNumber: table_number || null,
-      address: address || null,
+      address: order_type === "delivery" ? finalAddress : null,
     });
     const updatedSnap = await sessionRef.once("value");
     const updated = updatedSnap.val();
     const summary =
       billSummaryText(updated.items, updated.subtotal, updated.discount || 0, updated.couponCode) +
-      (updated.note ? `\n📝 ${updated.note}` : "");
+      (updated.note ? `\n📝 ${updated.note}` : "") +
+      (updated.address ? `\n📍 ${updated.address}` : "");
     return { screen: "CONFIRM", data: { final_summary: summary } };
   }
 
