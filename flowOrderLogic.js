@@ -19,12 +19,25 @@ async function handleFlowDataExchange(db, restaurantId, from, decryptedBody) {
 
   if (trigger === "details_next") {
     const { note, order_type, table_number, address } = decryptedBody.data;
+    console.log("FLOW details_next data:", JSON.stringify(decryptedBody.data), "| from:", from);
 
-    // ★ Delivery mein address khaali ho to saved address uthao
-    let finalAddress = (address || "").trim() || null;
+    // Flow kabhi placeholder text bhej de to usse bhi khaali maano
+    let rawAddress = String(address ?? "").trim();
+    if (
+      rawAddress === "" ||
+      rawAddress.includes("${") ||
+      ["undefined", "null"].includes(rawAddress.toLowerCase())
+    ) {
+      rawAddress = "";
+    }
+
+    let finalAddress = rawAddress || null;
     if (order_type === "delivery" && !finalAddress) {
-      const addrSnap = await db.ref(`customerProfiles/${restaurantId}/${from}/address`).once("value");
+      const addrSnap = await db
+        .ref(`customerProfiles/${restaurantId}/${from}/address`)
+        .once("value");
       finalAddress = addrSnap.val() || null;
+      console.log("FLOW saved address lookup:", `customerProfiles/${restaurantId}/${from}/address`, "->", finalAddress);
     }
 
     await sessionRef.update({
