@@ -5,15 +5,14 @@ const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v21.0";
 const BUSINESS_ID = process.env.META_BUSINESS_ID;
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const FEED_BASE_URL = "https://khaatogobackend-production.up.railway.app";
-
 async function createRestaurantCatalog(restaurantId, restaurantName, partnerBusinessId) {
-  if (!BUSINESS_ID || !ACCESS_TOKEN) {
-    throw new Error("META_BUSINESS_ID ya META_ACCESS_TOKEN missing hai .env mein");
+  if (!partnerBusinessId || !ACCESS_TOKEN) {
+    throw new Error("Restaurant ka Meta Business ID ya META_ACCESS_TOKEN missing hai");
   }
 
-  // ── Step 1: naya catalog banao ──
+  // ── Step 1: naya catalog RESTAURANT ke apne Business Manager ke andar banao ──
   const catalogRes = await fetch(
-    `https://graph.facebook.com/${GRAPH_VERSION}/${BUSINESS_ID}/owned_product_catalogs`,
+    `https://graph.facebook.com/${GRAPH_VERSION}/${partnerBusinessId}/owned_product_catalogs`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -56,30 +55,7 @@ async function createRestaurantCatalog(restaurantId, restaurantName, partnerBusi
   }
   console.log(`✅ Feed linked: ${feedData.id}`);
 
-  // ── Step 3: restaurant ke apne Business Manager ke saath share karo ──
-  let shareResult = null;
-  if (partnerBusinessId) {
-    const shareRes = await fetch(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${catalogId}/agencies`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          access_token: ACCESS_TOKEN,
-          business: partnerBusinessId,
-          permitted_tasks: ["ADVERTISE"],
-        }),
-      }
-    );
-    shareResult = await shareRes.json();
-    if (shareResult.error) {
-      console.error(`⚠️ Sharing failed for ${restaurantId}:`, shareResult.error.message);
-    } else {
-      console.log(`✅ Shared with partner business ${partnerBusinessId}`);
-    }
-  }
-
-  return { catalogId, feedId: feedData.id, shareResult };
+  return { catalogId, feedId: feedData.id };
 }
 
 module.exports = { createRestaurantCatalog };
