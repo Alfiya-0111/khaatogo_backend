@@ -371,15 +371,15 @@ app.post("/create-restaurant-catalog", async (req, res) => {
     const rData = rSnap.val();
     if (!rData) return res.status(404).json({ error: "Restaurant not found" });
 
-    const finalMetaBusinessId = metaBusinessId || rData.metaBusinessId;
+   if (!process.env.META_BUSINESS_ID) {
+  return res.status(500).json({ error: "META_BUSINESS_ID server par set nahi hai" });
+}
 
-    if (!finalMetaBusinessId) {
-      return res.status(400).json({
-        error: "Restaurant ne apna Meta Business Manager ID nahi diya hai — Settings mein set karwao",
-      });
-    }
-
-    const result = await createRestaurantCatalog(restaurantId, rData.name, finalMetaBusinessId);
+const result = await createRestaurantCatalog(
+  restaurantId,
+  rData.name,
+  process.env.META_BUSINESS_ID
+);
 
     await db.ref(`restaurants/${restaurantId}/metaCatalog`).update({
       catalogId: result.catalogId,
