@@ -31,6 +31,14 @@ async function getDishDetails(db, restaurantId, dishId) {
 }
 
 async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
+  // Temporary: restaurant ne fallbackMessage set kiya ho to catalog ke bajaye wahi bhejo
+  const fbSnap = await db.ref(`restaurants/${restaurantId}/whatsapp/fallbackMessage`).once("value");
+  const fallbackMessage = fbSnap.val();
+  if (fallbackMessage) {
+    await sendText(phoneNumberId, from, fallbackMessage);
+    return;
+  }
+
   const [menuSnap, catalogSnap, catSnap] = await Promise.all([
     db.ref(`restaurants/${restaurantId}/menu`).once("value"),
     db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value"),
