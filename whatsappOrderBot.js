@@ -17,7 +17,7 @@ async function sendWhatsAppMessage(phoneNumberId, payload) {
     }
   );
   const data = await res.json();
-  if (data.error) console.error("WhatsApp send error:", data.error.message);
+  if (data.error) console.error("WhatsApp send error:", data.error.message, "|", JSON.stringify(data.error.error_data || {}), "| code:", data.error.code);
   return data;
 }
 
@@ -65,7 +65,7 @@ function sendProductList(phoneNumberId, to, catalogId, headerText, bodyText, sec
       type: "product_list",
       header: { type: "text", text: headerText },
       body: { text: bodyText },
-      footer: { text: "Items select karke cart mein add karo" },
+     footer: { text: "Select items and add them to your cart" },
       action: {
         catalog_id: catalogId,
         sections, // [{ title: "Starters", product_items: [{ product_retailer_id: "restId_dishId" }] }]
@@ -99,14 +99,14 @@ function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, scr
       type: "flow",
       header: { type: "text", text: headerText },
       body: { text: bodyText },
-      footer: { text: "Neeche button dabao" },
+      footer: { text: "Tap the button below" },
       action: {
         name: "flow",
         parameters: {
           flow_message_version: "3",
           flow_token: flowToken,
           flow_id: process.env.WHATSAPP_FLOW_ID,
-          flow_cta: "Order Customize Karo",
+         flow_cta: "Customize Order",
           flow_action: "navigate",
           flow_action_payload: { screen, data: screenData },
         },

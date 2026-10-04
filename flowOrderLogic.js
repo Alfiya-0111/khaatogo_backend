@@ -55,7 +55,7 @@ async function handleFlowDataExchange(db, restaurantId, from, decryptedBody) {
     return { screen: "CONFIRM", data: { final_summary: summary } };
   }
 
-  return { screen: "CONFIRM", data: { final_summary: "Kuch galat ho gaya, dubara try karo." } };
+  return { screen: "CONFIRM", data: { final_summary: "Something went wrong. Please try again." } };
 }
 
 module.exports = { handleFlowDataExchange };

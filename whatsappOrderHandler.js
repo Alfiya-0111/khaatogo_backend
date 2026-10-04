@@ -29,7 +29,16 @@ async function getDishDetails(db, restaurantId, dishId) {
     saladConfig: dish.saladConfig || null,
   };
 }
-
+// Row description max 72 chars hota hai
+function namesPreview(names, max = 72) {
+  let out = "";
+  for (const n of names) {
+    const next = out ? `${out}, ${n}` : n;
+    if (next.length > max - 3 && out) return (out + "...").slice(0, max);
+    out = next;
+  }
+  return out.slice(0, max);
+}
 // Menu ko category ke hisaab se group karo (sirf in-stock dishes)
 async function loadMenuGroups(db, restaurantId) {
   const [menuSnap, catSnap] = await Promise.all([
@@ -55,9 +64,12 @@ async function loadMenuGroups(db, restaurantId) {
     }
     if (cats.length === 0) cats.push({ key: "other", name: "Other" });
 
-    cats.forEach(({ key, name }) => {
-      if (!groups[key]) groups[key] = { name, items: [] };
-      if (!groups[key].items.includes(retailerId)) groups[key].items.push(retailerId);
+      cats.forEach(({ key, name }) => {
+      if (!groups[key]) groups[key] = { name, items: [], dishNames: [] };
+      if (!groups[key].items.includes(retailerId)) {
+        groups[key].items.push(retailerId);
+        groups[key].dishNames.push(dish.name || "Item");
+      }
     });
   }
   return groups;
@@ -75,10 +87,10 @@ async function sendCategoryList(db, phoneNumberId, from, restaurantId, page = 0)
     return;
   }
 
-  const toRow = ([key, g]) => ({
+   const toRow = ([key, g]) => ({
     id: `cat:${key}`,
     title: g.name.slice(0, 24),
-    description: `${g.items.length} items`,
+    description: namesPreview(g.dishNames),
   });
 
   let rows;
@@ -278,7 +290,26 @@ const MID_FLOW_STATES = [
 async function handleIncomingMessage(db, razorpay, message, phoneNumberId, restaurantId) {
   const from = message.from;
   const sessionRef = db.ref(`whatsappSessions/${restaurantId}/${from}`);
-
+  // ── Category browsing (session ki zaroorat nahi) ──
+  if (message.type === "interactive" && message.interactive?.type === "list_reply") {
+    const id = message.interactive.list_reply.id || "";
+    if (id.startsWith("cat:")) {
+      await sendCategoryProducts(db, phoneNumberId, from, restaurantId, id.slice(4));
+      return;
+    }
+    if (id.startsWith("catpage:")) {
+      await sendCategoryList(db, phoneNumberId, from, restaurantId, Number(id.split(":")[1]) || 0);
+      return;
+    }
+  }
+  if (
+    message.type === "interactive" &&
+    message.interactive?.type === "button_reply" &&
+    message.interactive.button_reply.id === "show_categories"
+  ) {
+    await sendCategoryList(db, phoneNumberId, from, restaurantId);
+    return;
+  }
   if (message.type === "text") {
     const snap = await sessionRef.once("value");
     const session = snap.val();
@@ -364,7 +395,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
           } else {
             // saved bhi nahi hai -> chat mein maang lo
             await sessionRef.update({ state: "awaiting_address" });
-            await sendText(phoneNumberId, from, "📍 Delivery address type karke bhejo (pura address ek message mein):");
+            await sendText(phoneNumberId, from, "📍 Please type your full delivery address in a single message:");
             return;
           }
         }
@@ -374,7 +405,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
     } else if (responseJson.trigger === "cancel_order") {
       await sessionRef.remove();
-      await sendText(phoneNumberId, from, "❌ Order cancel kar diya gaya. Naya order shuru karne ke liye phir se catalog se items bhejo.");
+      await sendText(phoneNumberId, from, "❌ Your order has been cancelled. To start a new order, send a message and pick items from our menu.");
     }
     return;
   }
@@ -398,7 +429,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
         const billText = billSummaryText(session.items, session.subtotal, 0, null);
         await sendFlowMessage(
           phoneNumberId, from, flowToken,
-          "Order Customize Karo", billText,
+          "Customize Your Order", billText,
           "DETAILS", { bill_summary: billText }
         );
       }
@@ -423,7 +454,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
 
     if (buttonId === "coupon_no") {
       await sessionRef.update({ state: "awaiting_order_type" });
-      await sendButtons(phoneNumberId, from, "Order kaise chahiye?", [
+      await sendButtons(phoneNumberId, from, "How would you like your order?", [
         { id: "type_dinein", title: "Dine-in" },
         { id: "type_delivery", title: "Delivery" },
         { id: "type_takeaway", title: "Takeaway" },
@@ -450,7 +481,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
         await sendText(
           phoneNumberId,
           from,
-          `📍 Aapka saved address use kiya ja raha hai:\n${savedAddress}`
+         `📍 Using your saved address:\n${savedAddress}`
         );
         await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
       } else {
