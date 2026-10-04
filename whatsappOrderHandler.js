@@ -1,6 +1,6 @@
 // whatsappOrderHandler.js
 const admin = require("firebase-admin");
-const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage } = require("./whatsappOrderBot");
+const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage, sendList } = require("./whatsappOrderBot");
 const { billSummaryText } = require("./billUtils");
 
 const { getFirestore } = require("firebase-admin/firestore");
@@ -30,68 +30,128 @@ async function getDishDetails(db, restaurantId, dishId) {
   };
 }
 
+// Menu ko category ke hisaab se group karo (sirf in-stock dishes)
+async function loadMenuGroups(db, restaurantId) {
+  const [menuSnap, catSnap] = await Promise.all([
+    db.ref(`restaurants/${restaurantId}/menu`).once("value"),
+    db.ref(`restaurants/${restaurantId}/categories`).once("value"),
+  ]);
+  const menu = menuSnap.val() || {};
+  const categoriesData = catSnap.val() || {};
+  const groups = {}; // key -> { name, items: [retailerId] }
+
+  for (const [dishId, dish] of Object.entries(menu)) {
+    if (dish.inStock === false || dish.remainingQuantity === 0) continue;
+    const retailerId = `${restaurantId}_${dishId}`;
+
+    const cats = [];
+    if (Array.isArray(dish.categoryIds) && dish.categoryIds.length > 0) {
+      dish.categoryIds.forEach((cid) => {
+        const name = categoriesData[cid]?.name;
+        if (name) cats.push({ key: cid, name });
+      });
+    } else if (dish.category) {
+      cats.push({ key: dish.category, name: dish.category });
+    }
+    if (cats.length === 0) cats.push({ key: "other", name: "Other" });
+
+    cats.forEach(({ key, name }) => {
+      if (!groups[key]) groups[key] = { name, items: [] };
+      if (!groups[key].items.includes(retailerId)) groups[key].items.push(retailerId);
+    });
+  }
+  return groups;
+}
+
+const CATEGORIES_PER_PAGE = 9;
+
+async function sendCategoryList(db, phoneNumberId, from, restaurantId, page = 0) {
+  const nameSnap = await db.ref(`restaurants/${restaurantId}/name`).once("value");
+  const restaurantName = nameSnap.val() || "our restaurant";
+  const entries = Object.entries(await loadMenuGroups(db, restaurantId));
+
+  if (entries.length === 0) {
+    await sendText(phoneNumberId, from, "Our menu is empty right now. Please try again in a little while.");
+    return;
+  }
+
+  const toRow = ([key, g]) => ({
+    id: `cat:${key}`,
+    title: g.name.slice(0, 24),
+    description: `${g.items.length} items`,
+  });
+
+  let rows;
+  if (entries.length <= 10) {
+    rows = entries.map(toRow);
+  } else {
+    const start = page * CATEGORIES_PER_PAGE;
+    rows = entries.slice(start, start + CATEGORIES_PER_PAGE).map(toRow);
+    if (start + CATEGORIES_PER_PAGE < entries.length) {
+      rows.push({ id: `catpage:${page + 1}`, title: "More Categories" });
+    }
+  }
+
+  await sendList(
+    phoneNumberId,
+    from,
+    `Welcome to ${restaurantName}`.slice(0, 60),
+    "Please choose a category to see our dishes.",
+    "View Categories",
+    rows
+  );
+}
+
+async function sendCategoryProducts(db, phoneNumberId, from, restaurantId, categoryKey) {
+  const catalogSnap = await db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value");
+  const catalogId = catalogSnap.val();
+  if (!catalogId) {
+    await sendText(phoneNumberId, from, "Our menu is being set up. Please try again shortly.");
+    return;
+  }
+
+  const groups = await loadMenuGroups(db, restaurantId);
+  const group = groups[categoryKey];
+  if (!group) {
+    await sendText(phoneNumberId, from, "This category is not available right now.");
+    await sendCategoryList(db, phoneNumberId, from, restaurantId);
+    return;
+  }
+
+  // WhatsApp limit: ek message mein max 30 products
+  const chunks = [];
+  for (let i = 0; i < group.items.length; i += 30) chunks.push(group.items.slice(i, i + 30));
+
+  for (let i = 0; i < chunks.length; i++) {
+    const title = chunks.length > 1 ? `${group.name} (${i + 1}/${chunks.length})` : group.name;
+    await sendProductList(
+      phoneNumberId,
+      from,
+      catalogId,
+      title.slice(0, 60),
+      "Select the items you want and add them to your cart.",
+      [{ title: group.name.slice(0, 24), product_items: chunks[i].map((id) => ({ product_retailer_id: id })) }]
+    );
+  }
+
+  await sendButtons(
+    phoneNumberId,
+    from,
+    "Done adding items? Open your cart and tap Place Order, or browse another category.",
+    [{ id: "show_categories", title: "Other Categories" }]
+  );
+}
+
+// Entry point — "Hi" par ye chalta hai
 async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
-  // Temporary: restaurant ne fallbackMessage set kiya ho to catalog ke bajaye wahi bhejo
+  // Temporary fallback (Street Bites ke liye) — ye field hatate hi normal flow chalu
   const fbSnap = await db.ref(`restaurants/${restaurantId}/whatsapp/fallbackMessage`).once("value");
   const fallbackMessage = fbSnap.val();
   if (fallbackMessage) {
     await sendText(phoneNumberId, from, fallbackMessage);
     return;
   }
-
-  const [menuSnap, catalogSnap, catSnap] = await Promise.all([
-    db.ref(`restaurants/${restaurantId}/menu`).once("value"),
-    db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value"),
-    db.ref(`restaurants/${restaurantId}/categories`).once("value"),
-  ]);
-
-  const menu = menuSnap.val() || {};
-  const catalogId = catalogSnap.val();
-  const categoriesData = catSnap.val() || {};
-
-  if (!catalogId) {
-    await sendText(phoneNumberId, from, "Menu abhi setup ho raha hai, thodi der baad try karo 🙏");
-    return;
-  }
-
-  const grouped = {};
-  for (const [dishId, dish] of Object.entries(menu)) {
-    if (dish.inStock === false || dish.remainingQuantity === 0) continue;
-
-    let catNames = [];
-    if (Array.isArray(dish.categoryIds) && dish.categoryIds.length > 0) {
-      dish.categoryIds.forEach((cid) => {
-        const catName = categoriesData[cid]?.name;
-        if (catName) catNames.push(catName);
-      });
-    } else if (dish.category) {
-      catNames.push(dish.category);
-    }
-    if (catNames.length === 0) catNames.push("Other");
-
-    catNames.forEach((cat) => {
-      if (!grouped[cat]) grouped[cat] = [];
-      grouped[cat].push({ product_retailer_id: `${restaurantId}_${dishId}` });
-    });
-  }
-
-  const sections = Object.entries(grouped)
-    .slice(0, 30)
-    .map(([title, items]) => ({ title: title.slice(0, 24), product_items: items.slice(0, 30) }));
-
-  if (sections.length === 0) {
-    await sendText(phoneNumberId, from, "Abhi menu khaali hai, thodi der baad try karo 🙏");
-    return;
-  }
-
-  await sendProductList(
-    phoneNumberId,
-    from,
-    catalogId,
-    "Hamara Menu 🍽️",
-    "Neeche se items select karo aur cart mein add karke order karo:",
-    sections
-  );
+  await sendCategoryList(db, phoneNumberId, from, restaurantId);
 }
 
 // ★ Customer ka saved delivery address check karo
@@ -116,13 +176,13 @@ async function applyCoupon(db, restaurantId, code, subtotal) {
     (c) => (c.code || "").toUpperCase() === code.trim().toUpperCase()
   );
 
-  if (!match) return { error: "Coupon code galat hai ya exist nahi karta." };
-  if (!match.active) return { error: "Ye coupon abhi active nahi hai." };
+  if (!match) return { error: "This coupon code is invalid." };
+  if (!match.active) return { error: "This coupon is not active right now." };
   if (match.expiryDate && new Date(match.expiryDate).getTime() < Date.now()) {
-    return { error: "Ye coupon expire ho chuka hai." };
+    return { error: "This coupon has expired." };
   }
   if (match.minOrder && subtotal < Number(match.minOrder)) {
-    return { error: `Is coupon ke liye minimum order ₹${match.minOrder} hona chahiye.` };
+    return { error: `A minimum order of ₹${match.minOrder} is required for this coupon.` };
   }
 
   let discount = 0;
@@ -270,9 +330,9 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     });
 
     await sendText(phoneNumberId, from, billSummaryText(lines, subtotal, 0, null));
-    await sendButtons(phoneNumberId, from, "Order customize karni hai ya sab normal (jaldi) rakhein?", [
-      { id: "customize_quick", title: "Sab Normal" },
-      { id: "customize_start", title: "Customize Karo" },
+    await sendButtons(phoneNumberId, from, "Would you like to customize your order, or keep it standard (faster)?", [
+      { id: "customize_quick", title: "Keep Standard" },
+      { id: "customize_start", title: "Customize" },
     ]);
     return;
   }
@@ -300,7 +360,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
 
           if (savedAddress) {
             await sessionRef.update({ address: savedAddress });
-            await sendText(phoneNumberId, from, `📍 Aapka saved address use kiya ja raha hai:\n${savedAddress}`);
+            await sendText(phoneNumberId, from, `📍 Using your saved address:\n${savedAddress}`);
           } else {
             // saved bhi nahi hai -> chat mein maang lo
             await sessionRef.update({ state: "awaiting_address" });
@@ -373,13 +433,13 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
 
     if (buttonId === "coupon_yes") {
       await sessionRef.update({ state: "awaiting_coupon_code" });
-      await sendText(phoneNumberId, from, "Coupon code type karke bhejo:");
+      await sendText(phoneNumberId, from, "Please type your coupon code:");
       return;
     }
 
     if (buttonId === "type_dinein") {
       await sessionRef.update({ state: "awaiting_table", orderType: "dine_in" });
-      await sendText(phoneNumberId, from, "Table number bhejo (agar pata nahi to 'skip' likho):");
+      await sendText(phoneNumberId, from, "Please send your table number (type 'skip' if you don't know):");
       return;
     }
     if (buttonId === "type_delivery") {
@@ -395,7 +455,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
         await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
       } else {
         await sessionRef.update({ state: "awaiting_address", orderType: "delivery" });
-        await sendText(phoneNumberId, from, "📍 Delivery address type karke bhejo (pura address ek message mein):");
+        await sendText(phoneNumberId, from, "📍 Please type your full delivery address in a single message:");
       }
       return;
     }
@@ -407,7 +467,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
 
     if (buttonId === "confirm_order") {
       await sessionRef.update({ state: "awaiting_payment_method" });
-      await sendButtons(phoneNumberId, from, "Payment kaise karenge?", [
+      await sendButtons(phoneNumberId, from, "How would you like to pay?", [
         { id: "pay_upi", title: "Pay via UPI" },
         { id: "pay_cod", title: "Cash on Delivery" },
       ]);
@@ -415,7 +475,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     }
     if (buttonId === "cancel_order") {
       await sessionRef.remove();
-      await sendText(phoneNumberId, from, "❌ Order cancel kar diya gaya. Naya order shuru karne ke liye phir se catalog se items bhejo.");
+      await sendText(phoneNumberId, from, "❌ Your order has been cancelled. To start a new order, send a message and pick items from our menu.");
       return;
     }
 
@@ -451,7 +511,7 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       } else {
         const result = await applyCoupon(db, restaurantId, code, session.subtotal);
         if (result.error) {
-          await sendText(phoneNumberId, from, `❌ ${result.error}\nDubara try karo ya 'skip' likho.`);
+          await sendText(phoneNumberId, from, `❌ ${result.error}\nPlease try again or type 'skip'.`);
           return;
         }
         await sessionRef.update({ discount: result.discount, couponCode: result.code, state: "awaiting_order_type" });
@@ -503,13 +563,13 @@ async function proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId,
   const couponAvailable = await hasActiveCoupon(db, restaurantId);
   if (couponAvailable) {
     await sessionRef.update({ state: "awaiting_coupon_choice" });
-    await sendButtons(phoneNumberId, from, "Kya koi coupon apply karna hai?", [
+    await sendButtons(phoneNumberId, from, "Do you have a coupon code?", [
       { id: "coupon_yes", title: "Apply Coupon" },
       { id: "coupon_no", title: "No Coupon" },
     ]);
   } else {
     await sessionRef.update({ state: "awaiting_order_type" });
-    await sendButtons(phoneNumberId, from, "Order kaise chahiye?", [
+    await sendButtons(phoneNumberId, from, "How would you like your order?", [
       { id: "type_dinein", title: "Dine-in" },
       { id: "type_delivery", title: "Delivery" },
       { id: "type_takeaway", title: "Takeaway" },
@@ -525,7 +585,7 @@ async function sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef
     from,
     billSummaryText(session.items, session.subtotal, session.discount || 0, session.couponCode)
   );
-  await sendButtons(phoneNumberId, from, "Order confirm karein?", [
+  await sendButtons(phoneNumberId, from, "Would you like to confirm your order?", [
     { id: "confirm_order", title: "Confirm Order" },
     { id: "cancel_order", title: "Cancel Order" },
   ]);
@@ -580,13 +640,13 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
   const maxPrepTime = orderItems.length > 0
     ? Math.max(...orderItems.map((i) => i.prepTime || 15))
     : 15;
-  const readyLine = `\n⏱️ Aapka order ~${maxPrepTime} minute mein ready ho jayega.`;
+  const readyLine = `\n⏱️ Your order will be ready in about ${maxPrepTime} minutes.`;
 
   if (paymentMethod === "cod") {
     await sendText(
       phoneNumberId,
       from,
-      `✅ Order confirm ho gaya!\nOrder ID: ${orderId}\nPayment cash pe.${readyLine}`
+      `✅ Your order is confirmed!\nOrder ID: ${orderId}\nPayment: Cash on Delivery.${readyLine}`
     );
     return;
   }
@@ -601,7 +661,7 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     await sendText(
       phoneNumberId,
       from,
-      `❌ UPI payment abhi setup nahi hai. Cash on Delivery choose karo, ya restaurant se contact karo.`
+      `❌ UPI payment is not set up yet. Please choose Cash on Delivery or contact the restaurant.`
     );
     return;
   }
@@ -613,7 +673,7 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     phoneNumberId,
     from,
     qrImageUrl,
-    `💳 Scan karke ₹${total.toFixed(2)} pay karo\nOrder ID: ${orderId}${readyLine}`
+    `💳 Scan the QR code to pay ₹${total.toFixed(2)}\nOrder ID: ${orderId}${readyLine}`
   );
 }
 

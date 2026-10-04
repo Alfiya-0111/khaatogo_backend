@@ -73,6 +73,23 @@ function sendProductList(phoneNumberId, to, catalogId, headerText, bodyText, sec
     },
   });
 }
+// rows: [{ id, title, description }]  (WhatsApp limit: total 10 rows)
+function sendList(phoneNumberId, to, headerText, bodyText, buttonText, rows) {
+  return sendWhatsAppMessage(phoneNumberId, {
+    to,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: { type: "text", text: headerText.slice(0, 60) },
+      body: { text: bodyText },
+      footer: { text: "Tap the button below to choose" },
+      action: {
+        button: buttonText.slice(0, 20),
+        sections: [{ title: "Menu Categories", rows }],
+      },
+    },
+  });
+}
 // ★ NEW — WhatsApp Flow open karne wala interactive message
 function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, screen, screenData) {
   return sendWhatsAppMessage(phoneNumberId, {
@@ -98,4 +115,4 @@ function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, scr
   });
 }
 
-module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage };
+module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage, sendList };
