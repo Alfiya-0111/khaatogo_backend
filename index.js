@@ -12,7 +12,7 @@ const { setupAbsentJob } = require("./markAbsentJob");
 // const Settingstproutes = require("./Settingstproutes");
 // ? hh
 const { setupCatalogSync, upsertCatalogItem } = require("./catalogSync");
-
+const { dishCategoryName } = require("./categoryUtils");
 // ── Firebase Admin init ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 const firebaseApp = admin.initializeApp({
@@ -180,19 +180,19 @@ app.get("/catalog-feed.csv", async (req, res) => {
     const csvField = (val) =>
       `"${String(val ?? "").replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
 
-const HEADER = [
-  "id", "title", "description", "availability", "condition", "price",
-  "link", "image_link", "brand", "category", // ★ NEW
-  "availability_circle_origin.latitude",
-  "availability_circle_origin.longitude",
-  "availability_circle_radius",
-  "availability_circle_radius_unit",
-];
+    const HEADER = [
+      "id", "title", "description", "availability", "condition", "price",
+      "link", "image_link", "brand", "custom_label_0",
+      "availability_circle_origin.latitude",
+      "availability_circle_origin.longitude",
+      "availability_circle_radius",
+      "availability_circle_radius_unit",
+    ];
     const rows = [HEADER.join(",")];
 
     for (const [restaurantId, rData] of Object.entries(restaurants)) {
       const menu = rData.menu || {};
-
+    const categoriesData = rData.categories || {};
            const lat = rData.attendanceGeofence?.lat ?? "";
       const lng = rData.attendanceGeofence?.lng ?? "";
       const radiusKm = 5;
@@ -206,13 +206,12 @@ const HEADER = [
         const price = `${(Number(dish.price) || 0).toFixed(2)} INR`;
         const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
         const image = dish.imageUrl || "https://via.placeholder.com/400";
-
 rows.push(
   [
     csvField(id), csvField(title), csvField(description),
     csvField(availability), csvField("new"), csvField(price),
     csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
-    csvField(dish.category || "Food"), // ★ NEW
+    csvField(dishCategoryName(dish, categoriesData)),
     csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
   ].join(",")
 );
@@ -239,9 +238,9 @@ app.get("/catalog-feed/:restaurantId.csv", async (req, res) => {
     const csvField = (val) =>
       `"${String(val ?? "").replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
 
-    const HEADER = [
+        const HEADER = [
       "id", "title", "description", "availability", "condition", "price",
-      "link", "image_link", "brand",
+      "link", "image_link", "brand", "custom_label_0",
       "availability_circle_origin.latitude",
       "availability_circle_origin.longitude",
       "availability_circle_radius",
@@ -250,6 +249,7 @@ app.get("/catalog-feed/:restaurantId.csv", async (req, res) => {
     const rows = [HEADER.join(",")];
 
     const menu = rData.menu || {};
+        const categoriesData = rData.categories || {};
     const lat = rData.attendanceGeofence?.lat ?? "";
     const lng = rData.attendanceGeofence?.lng ?? "";
     const radiusKm = 5;
@@ -269,6 +269,7 @@ app.get("/catalog-feed/:restaurantId.csv", async (req, res) => {
           csvField(id), csvField(title), csvField(description),
           csvField(availability), csvField("new"), csvField(price),
           csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
+                    csvField(dishCategoryName(dish, categoriesData)),
           csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
         ].join(",")
       );
@@ -432,11 +433,37 @@ app.post("/test-catalog-sync", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-const { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba, createProductSetsByCategory } = require("./whatsappCatalog");
+
 
 // ══════════════════════════════════════════
 // ★ NEW: Restaurant ka catalog WhatsApp Business Account se attach karo
 // ══════════════════════════════════════════
+const { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba, createProductSetsByCategory, syncCategoryCollections } = require("./whatsappCatalog");
+
+app.post("/sync-category-collections", async (req, res) => {
+  try {
+    const { restaurantId } = req.body;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const [catalogSnap, menuSnap, catSnap] = await Promise.all([
+      db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value"),
+      db.ref(`restaurants/${restaurantId}/menu`).once("value"),
+      db.ref(`restaurants/${restaurantId}/categories`).once("value"),
+    ]);
+    const catalogId = catalogSnap.val();
+    if (!catalogId) return res.status(400).json({ error: "metaCatalog/catalogId missing" });
+
+    const menu = menuSnap.val() || {};
+    const categoriesData = catSnap.val() || {};
+    const names = [...new Set(Object.values(menu).map((d) => dishCategoryName(d, categoriesData)))];
+
+    const result = await syncCategoryCollections(catalogId, names);
+    res.json({ status: "ok", categories: names, ...result });
+  } catch (e) {
+    console.error("Sync collections error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 app.post("/attach-whatsapp-catalog", async (req, res) => {
   try {
     const { restaurantId, wabaId, phoneNumberId } = req.body;
