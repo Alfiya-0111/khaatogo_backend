@@ -180,13 +180,9 @@ app.get("/catalog-feed.csv", async (req, res) => {
     const csvField = (val) =>
       `"${String(val ?? "").replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
 
-    const HEADER = [
+      const HEADER = [
       "id", "title", "description", "availability", "condition", "price",
       "link", "image_link", "brand", "custom_label_0",
-      "availability_circle_origin.latitude",
-      "availability_circle_origin.longitude",
-      "availability_circle_radius",
-      "availability_circle_radius_unit",
     ];
     const rows = [HEADER.join(",")];
 
@@ -212,7 +208,7 @@ rows.push(
     csvField(availability), csvField("new"), csvField(price),
     csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
     csvField(dishCategoryName(dish, categoriesData)),
-    csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
+   
   ].join(",")
 );
       }
