@@ -1,6 +1,6 @@
 // whatsappOrderHandler.js
 const admin = require("firebase-admin");
-const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage, sendList } = require("./whatsappOrderBot");
+const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage } = require("./whatsappOrderBot");
 const { billSummaryText } = require("./billUtils");
 
 const { getFirestore } = require("firebase-admin/firestore");
@@ -157,12 +157,25 @@ async function sendCategoryProducts(db, phoneNumberId, from, restaurantId, categ
 async function sendMenuGreeting(db, phoneNumberId, from, restaurantId) {
   const nameSnap = await db.ref(`restaurants/${restaurantId}/name`).once("value");
   const restaurantName = nameSnap.val() || "our restaurant";
-  await sendButtons(
+
+  const groups = await loadMenuGroups(db, restaurantId);
+  const thumbnail = Object.values(groups)[0]?.items?.[0];
+
+  const res = await sendCatalogMessage(
     phoneNumberId,
     from,
-    `Welcome to ${restaurantName}! 👋\nTap the button below to see our menu.`,
-    [{ id: "view_menu", title: "View Menu" }]
+    `Welcome to ${restaurantName}! 👋\nTap View catalog to browse our menu by category, add items to your cart, and place your order.`,
+    thumbnail
   );
+
+  if (res?.error) {
+    await sendButtons(
+      phoneNumberId,
+      from,
+      `Welcome to ${restaurantName}! 👋\nTap the button below to see our menu.`,
+      [{ id: "view_menu", title: "View Menu" }]
+    );
+  }
 }
 
 // Categories ko WhatsApp ke limits ke hisaab se messages mein pack karo

@@ -90,6 +90,21 @@ function sendList(phoneNumberId, to, headerText, bodyText, buttonText, rows) {
     },
   });
 }
+// WhatsApp ka native "View catalog" message (collections ke saath catalog khulta hai)
+function sendCatalogMessage(phoneNumberId, to, bodyText, thumbnailRetailerId) {
+  const action = { name: "catalog_message" };
+  if (thumbnailRetailerId) action.parameters = { thumbnail_product_retailer_id: thumbnailRetailerId };
+  return sendWhatsAppMessage(phoneNumberId, {
+    to,
+    type: "interactive",
+    interactive: {
+      type: "catalog_message",
+      body: { text: bodyText },
+      footer: { text: "Browse, add to cart and place your order" },
+      action,
+    },
+  });
+}
 // ★ NEW — WhatsApp Flow open karne wala interactive message
 function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, screen, screenData) {
   return sendWhatsAppMessage(phoneNumberId, {
@@ -115,4 +130,4 @@ function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, scr
   });
 }
 
-module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage, sendList };
+module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage };

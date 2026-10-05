@@ -84,5 +84,39 @@ async function subscribeAppToWaba(wabaId) {
   }
   return data;
 }
+// Har category ke liye ek collection (product set) banao. Jo pehle se hai use chhod do.
+async function syncCategoryCollections(catalogId, names) {
+  const existing = new Set();
+  let url = `https://graph.facebook.com/${GRAPH_VERSION}/${catalogId}/product_sets?fields=name&limit=100&access_token=${ACCESS_TOKEN}`;
+  while (url) {
+    const r = await fetch(url);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error.message);
+    (d.data || []).forEach((s) => existing.add(s.name));
+    url = d.paging?.next || null;
+  }
 
-module.exports = { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba, createProductSetsByCategory }; // ★ export ad
+  const created = [], skipped = [], failed = [];
+  for (const name of names) {
+    if (existing.has(name)) { skipped.push(name); continue; }
+    const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${catalogId}/product_sets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_token: ACCESS_TOKEN,
+        name,
+        filter: JSON.stringify({ custom_label_0: { eq: name } }),
+      }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      console.error(`Collection failed for ${name}:`, data.error.message);
+      failed.push({ name, error: data.error.message });
+    } else {
+      created.push({ name, productSetId: data.id });
+    }
+  }
+  return { created, skipped, failed };
+}
+
+module.exports = { attachCatalogToWaba, enableCommerceSettings, subscribeAppToWaba, createProductSetsByCategory, syncCategoryCollections };
