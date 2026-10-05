@@ -153,7 +153,79 @@ async function sendCategoryProducts(db, phoneNumberId, from, restaurantId, categ
     [{ id: "show_categories", title: "Other Categories" }]
   );
 }
+// Greeting + "View Menu" button
+async function sendMenuGreeting(db, phoneNumberId, from, restaurantId) {
+  const nameSnap = await db.ref(`restaurants/${restaurantId}/name`).once("value");
+  const restaurantName = nameSnap.val() || "our restaurant";
+  await sendButtons(
+    phoneNumberId,
+    from,
+    `Welcome to ${restaurantName}! 👋\nTap the button below to see our menu.`,
+    [{ id: "view_menu", title: "View Menu" }]
+  );
+}
 
+// Categories ko WhatsApp ke limits ke hisaab se messages mein pack karo
+// (ek message: max 10 sections aur max 30 products)
+function buildMenuMessages(groups) {
+  const messages = [];
+  let current = [];
+  let count = 0;
+  const flush = () => {
+    if (current.length) {
+      messages.push(current);
+      current = [];
+      count = 0;
+    }
+  };
+
+  for (const g of Object.values(groups)) {
+    const items = [...g.items];
+    let part = 1;
+    while (items.length) {
+      if (current.length >= 10 || count >= 30) flush();
+      const take = items.splice(0, 30 - count);
+      const title = part > 1 ? `${g.name} (cont.)` : g.name;
+      current.push({
+        title: title.slice(0, 24),
+        product_items: take.map((id) => ({ product_retailer_id: id })),
+      });
+      count += take.length;
+      part++;
+    }
+  }
+  flush();
+  return messages;
+}
+
+// "View Menu" dabane par poora menu category-wise bhejo
+async function sendFullMenuProducts(db, phoneNumberId, from, restaurantId) {
+  const catalogSnap = await db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value");
+  const catalogId = catalogSnap.val();
+  if (!catalogId) {
+    await sendText(phoneNumberId, from, "Our menu is being set up. Please try again shortly.");
+    return;
+  }
+
+  const groups = await loadMenuGroups(db, restaurantId);
+  const messages = buildMenuMessages(groups);
+  if (messages.length === 0) {
+    await sendText(phoneNumberId, from, "Our menu is empty right now. Please try again in a little while.");
+    return;
+  }
+
+  for (let i = 0; i < messages.length; i++) {
+    const header = messages.length > 1 ? `Our Menu (${i + 1}/${messages.length})` : "Our Menu";
+    await sendProductList(
+      phoneNumberId,
+      from,
+      catalogId,
+      header,
+      "Select items, add them to your cart, then tap View Cart and Place Order.",
+      messages[i]
+    );
+  }
+}
 // Entry point — "Hi" par ye chalta hai
 async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
   // Temporary fallback (Street Bites ke liye) — ye field hatate hi normal flow chalu
@@ -163,7 +235,7 @@ async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
     await sendText(phoneNumberId, from, fallbackMessage);
     return;
   }
-  await sendCategoryList(db, phoneNumberId, from, restaurantId);
+  await sendMenuGreeting(db, phoneNumberId, from, restaurantId);
 }
 
 // ★ Customer ka saved delivery address check karo
@@ -305,9 +377,9 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
   if (
     message.type === "interactive" &&
     message.interactive?.type === "button_reply" &&
-    message.interactive.button_reply.id === "show_categories"
+    ["view_menu", "show_categories"].includes(message.interactive.button_reply.id)
   ) {
-    await sendCategoryList(db, phoneNumberId, from, restaurantId);
+    await sendFullMenuProducts(db, phoneNumberId, from, restaurantId);
     return;
   }
   if (message.type === "text") {
