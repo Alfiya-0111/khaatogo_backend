@@ -160,6 +160,8 @@ app.post("/webhook/kronos", async (req, res) => {
 // warna neeche wale routes mein req.body undefined milega
 // ══════════════════════════════════════════
 app.use(express.json());
+const { registerEmbeddedSignupRoutes } = require("./Embeddedsignup");
+registerEmbeddedSignupRoutes(app, db, admin);
 // app.use(Settingstproutes(db));
 // ★ NEW: Multer setup — file uploads memory mein handle karega
 // ══════════════════════════════════════════
@@ -335,7 +337,9 @@ app.post("/webhook/whatsapp-flow", async (req, res) => {
 app.post("/webhook/whatsapp", async (req, res) => {
   res.sendStatus(200); // Meta ko turant acknowledge karo
   try {
-    const value = req.body.entry?.[0]?.changes?.[0]?.value;
+  const change = req.body.entry?.[0]?.changes?.[0];
+if (change?.field !== "messages") return;
+const value = change.value;
     const phoneNumberId = value?.metadata?.phone_number_id;
     const message = value?.messages?.[0];
     if (!message || !phoneNumberId) return;
