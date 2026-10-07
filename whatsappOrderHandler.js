@@ -239,15 +239,31 @@ async function sendFullMenuProducts(db, phoneNumberId, from, restaurantId) {
     );
   }
 }
-// Entry point — "Hi" par ye chalta hai
+const FALLBACK_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 ghante
+
 async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
-  // Temporary fallback (Street Bites ke liye) — ye field hatate hi normal flow chalu
   const fbSnap = await db.ref(`restaurants/${restaurantId}/whatsapp/fallbackMessage`).once("value");
   const fallbackMessage = fbSnap.val();
+
   if (fallbackMessage) {
-    await sendText(phoneNumberId, from, fallbackMessage);
+    // Same banda baar-baar type kare to har baar reply na jaye
+    const seenRef = db.ref(`whatsappFallbackSeen/${restaurantId}/${from}`);
+    const lastSent = (await seenRef.once("value")).val() || 0;
+    if (Date.now() - lastSent < FALLBACK_COOLDOWN_MS) return;
+
+    // "||" se multiple messages alag karo, "\n" literal ko asli new line banao
+    const parts = String(fallbackMessage)
+      .split("||")
+      .map((p) => p.replace(/\\n/g, "\n").trim())
+      .filter(Boolean);
+
+    for (const part of parts) {
+      await sendText(phoneNumberId, from, part);
+    }
+    await seenRef.set(Date.now());
     return;
   }
+
   await sendMenuGreeting(db, phoneNumberId, from, restaurantId);
 }
 
