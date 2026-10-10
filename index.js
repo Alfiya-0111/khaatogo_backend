@@ -21,7 +21,7 @@ const firebaseApp = admin.initializeApp({
 });
 const db = getDatabase(firebaseApp);
 setupAbsentJob(db);
-
+require("./whatsappOrderBot").setDb(db);
 // ── Razorpay init ──
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,

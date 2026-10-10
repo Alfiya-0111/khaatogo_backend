@@ -3,15 +3,40 @@ const fetch = require("node-fetch");
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v21.0";
 const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+let _db = null;
+function setDb(db) { _db = db; }
+const tokenCache = {}; // phoneNumberId -> { token, at }
+
+// Restaurant ka apna token (embedded signup se mila), na mile to purana META_ACCESS_TOKEN
+async function getToken(phoneNumberId) {
+  const c = tokenCache[phoneNumberId];
+  if (c && Date.now() - c.at < 5 * 60 * 1000) return c.token;
+
+  let token = ACCESS_TOKEN;
+  try {
+    if (_db) {
+      const rid = (await _db.ref(`phoneNumberIdToRestaurant/${phoneNumberId}`).once("value")).val();
+      if (rid) {
+        const t = (await _db.ref(`whatsappSecrets/${rid}/businessToken`).once("value")).val();
+        if (t) token = t;
+      }
+    }
+  } catch (e) {
+    console.error("Token lookup failed:", e.message);
+  }
+  tokenCache[phoneNumberId] = { token, at: Date.now() };
+  return token;
+}
 
 async function sendWhatsAppMessage(phoneNumberId, payload) {
+  const token = await getToken(phoneNumberId);
   const res = await fetch(
     `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ messaging_product: "whatsapp", ...payload }),
     }
@@ -130,4 +155,4 @@ function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, scr
   });
 }
 
-module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage };
+module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage, setDb };
