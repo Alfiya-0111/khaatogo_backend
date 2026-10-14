@@ -3,6 +3,7 @@ const express = require("express");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const admin = require("firebase-admin");
+const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
 const cors = require("cors");
 const multer = require("multer");        // ★ NEW
@@ -17,8 +18,8 @@ const { dishCategoryName } = require("./categoryUtils");
 const { buildCatalogEntries } = require("./catalogVariants");
 // ── Firebase Admin init ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-const firebaseApp = admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+const firebaseApp = initializeApp({
+  credential: cert(serviceAccount),
   databaseURL: process.env.FIREBASE_DB_URL,
 });
 const db = getDatabase(firebaseApp);
