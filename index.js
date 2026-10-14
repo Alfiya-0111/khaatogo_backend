@@ -12,16 +12,18 @@ const { setupAbsentJob } = require("./markAbsentJob");
 // const Settingstproutes = require("./Settingstproutes");
 // ? hh
 const { setupCatalogSync, upsertCatalogItem } = require("./catalogSync");
+const { backfillVariants } = require("./backfillVariants");
 const { dishCategoryName } = require("./categoryUtils");
 const { buildCatalogEntries } = require("./catalogVariants");
 // ── Firebase Admin init ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 const firebaseApp = admin.initializeApp({
-  credential: admin.cert(serviceAccount),
+  credential: admin.credential.cert(serviceAccount),
   databaseURL: process.env.FIREBASE_DB_URL,
 });
 const db = getDatabase(firebaseApp);
 setupAbsentJob(db);
+setupCatalogSync(db);
 require("./whatsappOrderBot").setDb(db);
 // ── Razorpay init ──
 const razorpay = new Razorpay({
@@ -777,6 +779,12 @@ app.post("/create-order", async (req, res) => {
     res.status(500).json({ error: e.error?.description || e.message });
   }
 });
-
+app.get("/admin/backfill-variants", async (req, res) => {
+  if (!process.env.BACKFILL_KEY || req.query.key !== process.env.BACKFILL_KEY) {
+    return res.status(403).send("Forbidden");
+  }
+  res.send("Backfill started, Railway logs dekho");
+  backfillVariants(db).catch((e) => console.error("Backfill error:", e));
+});
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
