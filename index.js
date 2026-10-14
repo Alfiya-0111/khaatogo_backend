@@ -13,6 +13,7 @@ const { setupAbsentJob } = require("./markAbsentJob");
 // ? hh
 const { setupCatalogSync, upsertCatalogItem } = require("./catalogSync");
 const { dishCategoryName } = require("./categoryUtils");
+const { buildCatalogEntries } = require("./catalogVariants");
 // ── Firebase Admin init ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 const firebaseApp = admin.initializeApp({
@@ -195,24 +196,26 @@ app.get("/catalog-feed.csv", async (req, res) => {
       const lng = rData.attendanceGeofence?.lng ?? "";
       const radiusKm = 5;
 
-      for (const [dishId, dish] of Object.entries(menu)) {
-        const id = `${restaurantId}_${dishId}`;
-        const title = dish.name || "";
+          for (const [dishId, dish] of Object.entries(menu)) {
+        const baseId = `${restaurantId}_${dishId}`;
         const description = dish.description || dish.name || "";
         const availability =
           dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock";
-        const price = `${(Number(dish.price) || 0).toFixed(2)} INR`;
         const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
         const image = dish.imageUrl || "https://via.placeholder.com/400";
-rows.push(
-  [
-    csvField(id), csvField(title), csvField(description),
-    csvField(availability), csvField("new"), csvField(price),
-    csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
-    csvField(dishCategoryName(dish, categoriesData)),
-   
-  ].join(",")
-);
+        const category = dishCategoryName(dish, categoriesData);
+
+        for (const e of buildCatalogEntries(dish)) {
+          if (e.price <= 0) continue;
+          rows.push(
+            [
+              csvField(`${baseId}${e.idSuffix}`), csvField(e.name), csvField(description),
+              csvField(availability), csvField("new"), csvField(`${e.price.toFixed(2)} INR`),
+              csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
+              csvField(category),
+            ].join(",")
+          );
+        }
       }
     }
 
@@ -252,25 +255,28 @@ app.get("/catalog-feed/:restaurantId.csv", async (req, res) => {
     const lng = rData.attendanceGeofence?.lng ?? "";
     const radiusKm = 5;
 
-    for (const [dishId, dish] of Object.entries(menu)) {
-      const id = `${restaurantId}_${dishId}`;
-      const title = dish.name || "";
+      for (const [dishId, dish] of Object.entries(menu)) {
+      const baseId = `${restaurantId}_${dishId}`;
       const description = dish.description || dish.name || "";
       const availability =
         dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock";
-      const price = `${(Number(dish.price) || 0).toFixed(2)} INR`;
       const link = `https://khaatogo.com/menu/${restaurantId}?item=${dishId}`;
       const image = dish.imageUrl || "https://via.placeholder.com/400";
+      const category = dishCategoryName(dish, categoriesData);
 
-      rows.push(
-        [
-          csvField(id), csvField(title), csvField(description),
-          csvField(availability), csvField("new"), csvField(price),
-          csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
-                    csvField(dishCategoryName(dish, categoriesData)),
-          csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
-        ].join(",")
-      );
+      // Full/base + har Half/variant ke liye alag row
+      for (const e of buildCatalogEntries(dish)) {
+        if (e.price <= 0) continue;
+        rows.push(
+          [
+            csvField(`${baseId}${e.idSuffix}`), csvField(e.name), csvField(description),
+            csvField(availability), csvField("new"), csvField(`${e.price.toFixed(2)} INR`),
+            csvField(link), csvField(image), csvField(rData.name || "Khaatogo"),
+            csvField(category),
+            csvField(lat), csvField(lng), csvField(radiusKm), csvField("km"),
+          ].join(",")
+        );
+      }
     }
 
     res.set("Content-Type", "text/csv");

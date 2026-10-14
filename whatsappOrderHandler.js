@@ -1,4 +1,5 @@
 // whatsappOrderHandler.js
+const { buildCatalogEntries } = require("./catalogVariants");
 const admin = require("firebase-admin");
 const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage } = require("./whatsappOrderBot");
 const { billSummaryText } = require("./billUtils");
@@ -26,7 +27,8 @@ async function getDishDetails(db, restaurantId, dishId) {
     dishTasteProfile: dish.dishTasteProfile || "normal",
     saltLevelEnabled: !!dish.saltLevelEnabled,
     sugarLevelEnabled: !!dish.sugarLevelEnabled,
-    saladConfig: dish.saladConfig || null,
+   saladConfig: dish.saladConfig || null,
+  entries: buildCatalogEntries({ ...dish, name: dish.name || "Item" }),   
   };
 }
 // Row description max 72 chars hota hai
@@ -66,10 +68,13 @@ async function loadMenuGroups(db, restaurantId) {
 
       cats.forEach(({ key, name }) => {
       if (!groups[key]) groups[key] = { name, items: [], dishNames: [] };
-      if (!groups[key].items.includes(retailerId)) {
-        groups[key].items.push(retailerId);
-        groups[key].dishNames.push(dish.name || "Item");
-      }
+    if (!groups[key].items.includes(retailerId)) {
+  groups[key].items.push(retailerId);
+  groups[key].dishNames.push(dish.name || "Item");
+  (Array.isArray(dish.priceVariants) ? dish.priceVariants : []).forEach((v, i) => {
+    groups[key].items.push(`${retailerId}__v${i}`);
+  });
+}
     });
   }
   return groups;
@@ -431,15 +436,22 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
 
     let subtotal = 0;
     const lines = [];
-    for (const it of rawItems) {
-      const dishId = it.product_retailer_id.split("_").slice(1).join("_");
-      const dishInfo = await getDishDetails(db, restaurantId, dishId);
-      const qty = Number(it.quantity) || 0;
-      const lineTotal = (Number(it.item_price) || 0) * qty;
-      subtotal += lineTotal;
+for (const it of rawItems) {
+  const rest = it.product_retailer_id.split("_").slice(1).join("_");
+  const vm = rest.match(/^(.*)__v(\d+)$/);
+  const dishId = vm ? vm[1] : rest;
+  const variantIdx = vm ? Number(vm[2]) : null;
 
-      lines.push({
-        dishId, name: dishInfo.name, qty, price: it.item_price, lineTotal,
+  const dishInfo = await getDishDetails(db, restaurantId, dishId);
+  const entry = dishInfo.entries[variantIdx === null ? 0 : variantIdx + 1] || dishInfo.entries[0];
+  const qty = Number(it.quantity) || 0;
+  const lineTotal = (Number(it.item_price) || 0) * qty;
+  subtotal += lineTotal;
+
+  lines.push({
+    dishId, name: entry.name, portion: entry.portion || "",
+    qty, price: it.item_price, lineTotal,
+  
         prepTime: dishInfo.prepTime, image: dishInfo.image,
         dishTasteProfile: dishInfo.dishTasteProfile,
         saltLevelEnabled: dishInfo.saltLevelEnabled,
@@ -738,8 +750,9 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     spicePreference: it.spicePreference || "normal",
     saltPreference: it.saltPreference || "normal",
     sweetLevel: it.sweetLevel || "normal",
-    salad: it.salad || { qty: 0, taste: "normal" },
+       salad: it.salad || { qty: 0, taste: "normal" },
     specialInstructions: it.specialInstructions || "",
+    portion: it.portion || "",
   }));
 
   const orderData = {

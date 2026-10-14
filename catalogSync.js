@@ -1,4 +1,5 @@
 // catalogSync.js
+const { buildCatalogEntries, MAX_VARIANT_SLOTS } = require("./catalogVariants");
 const fetch = require("node-fetch");
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v21.0";
@@ -16,20 +17,24 @@ async function upsertCatalogItem(db, restaurantId, dishId, dish, restaurantGeo) 
     return;
   }
 
-  const retailerId = `${restaurantId}_${dishId}`;
-  const body = {
-    access_token: ACCESS_TOKEN,
-    item_type: "PRODUCT_ITEM",
-    requests: [{
+  const baseId = `${restaurantId}_${dishId}`;
+  const available =
+    dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock";
+  const entries = buildCatalogEntries(dish);
+  const variantCount = entries.length - 1;
+
+  const requests = entries
+    .filter((e) => e.price > 0)
+    .map((e) => ({
       method: "UPDATE",
       data: {
-        id: retailerId,
-        availability: dish.inStock !== false && dish.remainingQuantity !== 0 ? "in stock" : "out of stock",
+        id: `${baseId}${e.idSuffix}`,
+        availability: available,
         condition: "new",
         description: dish.description || dish.name,
         image_url: dish.imageUrl || "https://via.placeholder.com/400",
-        name: dish.name,
-        price: `${(Number(dish.price) || 0).toFixed(2)} INR`,
+        name: e.name,
+        price: `${e.price.toFixed(2)} INR`,
         currency: "INR",
         brand: "Khaatogo",
         category: dish.category || "Food",
@@ -38,8 +43,14 @@ async function upsertCatalogItem(db, restaurantId, dishId, dish, restaurantGeo) 
         availability_circle_radius: 5,
         availability_circle_radius_unit: "km",
       },
-    }],
-  };
+    }));
+
+  // Jo variant ab nahi rahe unhe catalog se hata do
+  for (let i = variantCount; i < MAX_VARIANT_SLOTS; i++) {
+    requests.push({ method: "DELETE", data: { id: `${baseId}__v${i}` } });
+  }
+
+  const body = { access_token: ACCESS_TOKEN, item_type: "PRODUCT_ITEM", requests };
 
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${catalogId}/items_batch`, {
     method: "POST",
@@ -47,8 +58,8 @@ async function upsertCatalogItem(db, restaurantId, dishId, dish, restaurantGeo) 
     body: JSON.stringify(body),
   });
   const data = await res.json();
-  if (data.error) console.error(`Catalog sync FAILED for ${retailerId}:`, data.error.message);
-  else console.log(`Catalog sync ACCEPTED for ${retailerId}`);
+  if (data.error) console.error(`Catalog sync FAILED for ${baseId}:`, data.error.message);
+  else console.log(`Catalog sync ACCEPTED for ${baseId}`);
   return data;
 }
 
@@ -57,11 +68,11 @@ async function deleteCatalogItem(db, restaurantId, dishId) {
   if (!catalogId || !ACCESS_TOKEN) return;
   const retailerId = `${restaurantId}_${dishId}`;
 
-  const body = {
-    access_token: ACCESS_TOKEN,
-    item_type: "PRODUCT_ITEM",
-    requests: [{ method: "DELETE", data: { id: retailerId } }],
-  };
+const requests = [{ method: "DELETE", data: { id: retailerId } }];
+for (let i = 0; i < MAX_VARIANT_SLOTS; i++) {
+  requests.push({ method: "DELETE", data: { id: `${retailerId}__v${i}` } });
+}
+const body = { access_token: ACCESS_TOKEN, item_type: "PRODUCT_ITEM", requests };
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${catalogId}/items_batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
