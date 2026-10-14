@@ -88,28 +88,30 @@ function setupCatalogSync(db) {
   menuRootRef.on("child_added", (restaurantSnap) => {
     const restaurantId = restaurantSnap.key;
     const menuRef = db.ref(`restaurants/${restaurantId}/menu`);
-    let initialLoadDone = false;
-
     const getRestaurantGeo = async () => {
       const geoSnap = await db.ref(`restaurants/${restaurantId}/attendanceGeofence`).once("value");
       return geoSnap.val() || {};
     };
 
-    menuRef.once("value", () => { initialLoadDone = true; });
+    menuRef.once("value").then((initial) => {
+      const known = new Set();
+      initial.forEach((c) => { known.add(c.key); });
 
-    menuRef.on("child_added", async (snap) => {
-      if (!initialLoadDone) return;
-      const geo = await getRestaurantGeo();
-      upsertCatalogItem(db, restaurantId, snap.key, snap.val(), geo); // ★ db pass karo
+      menuRef.on("child_added", async (snap) => {
+        if (known.has(snap.key)) return; // purani dishes skip
+        known.add(snap.key);
+        const geo = await getRestaurantGeo();
+        upsertCatalogItem(db, restaurantId, snap.key, snap.val(), geo);
+      });
+
+      menuRef.on("child_changed", async (snap) => {
+        const geo = await getRestaurantGeo();
+        upsertCatalogItem(db, restaurantId, snap.key, snap.val(), geo);
+      });
+
+      menuRef.on("child_removed", (snap) => deleteCatalogItem(db, restaurantId, snap.key));
     });
-
-    menuRef.on("child_changed", async (snap) => {
-      const geo = await getRestaurantGeo();
-      upsertCatalogItem(db, restaurantId, snap.key, snap.val(), geo); // ★ db pass karo
-    });
-
-    menuRef.on("child_removed", (snap) => deleteCatalogItem(db, restaurantId, snap.key)); // ★ db pass karo
-  });
+  }); // <-- this was missing: closes menuRootRef.on("child_added", ...)
 
   console.log("✅ Meta catalog sync listener started");
 }
