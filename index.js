@@ -331,7 +331,7 @@ app.post("/webhook/whatsapp-flow", async (req, res) => {
     }
 
     const encrypted = encryptResponse(responseObj, aesKey, ivBuffer);
-    console.log("Encrypted response length:", encrypted.length, "| preview:", encrypted.slice(0, 50));
+    // console.log("Encrypted response length:", encrypted.length, "| preview:", encrypted.slice(0, 50));
 
     res.set("Content-Type", "text/plain");
     res.send(encrypted);
