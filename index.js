@@ -5,6 +5,8 @@ const crypto = require("crypto");
 const admin = require("firebase-admin");
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
+const { getAuth } = require("firebase-admin/auth");
+const { registerStaffCheckinRoutes } = require("./staffCheckin");
 const cors = require("cors");
 const multer = require("multer");        // ★ NEW
 const axios = require("axios");          // ★ NEW
@@ -67,19 +69,24 @@ app.post(
       const event = JSON.parse(req.body.toString());
 
       // 1) Payment successful hone par order confirm karo
-          if (event.event === "payment.captured") {
-        const payment = event.payload.payment.entity;
-        const { restaurantId, orderId } = payment.notes || {};
-        if (restaurantId && orderId) {
-          await db.ref(`orders/${restaurantId}/${orderId}`).update({
-            paymentStatus: "paid_online",
-            status: "confirmed",
-            razorpayPaymentId: payment.id,
-            paidAt: Date.now(),
-          });
-          console.log(`✅ Payment confirmed for order ${orderId}`);
-        }
-      }
+    if (event.event === "payment.captured") {
+  const payment = event.payload.payment.entity;
+  const { restaurantId, orderId, appOrderId } = payment.notes || {};
+
+  if (appOrderId) {
+    // Khaatogo subscription payment
+    await handleSubscriptionPayment(payment, appOrderId);
+  } else if (restaurantId && orderId) {
+    // restaurant ka customer order (pehle jaisa)
+    await db.ref(`orders/${restaurantId}/${orderId}`).update({
+      paymentStatus: "paid_online",
+      status: "confirmed",
+      razorpayPaymentId: payment.id,
+      paidAt: Date.now(),
+    });
+    console.log(`✅ Payment confirmed for order ${orderId}`);
+  }
+}
 
       if (event.event === "payment.failed") {
         const payment = event.payload.payment.entity;
@@ -150,6 +157,45 @@ if (event.event === "qr_code.credited") {
     }
   }
 );
+// Subscription payment ko paymentRequests mein likhta hai
+async function handleSubscriptionPayment(payment, appOrderId) {
+  const pend = (await db.ref(`pendingPayments/${appOrderId}`).once("value")).val();
+  if (!pend) return;
+
+  const key = payment.id;
+  // webhook retry ho to duplicate na bane
+  const exists = (await db.ref(`paymentRequests/${key}`).once("value")).exists();
+  if (exists) return;
+
+  const now = Date.now();
+  await db.ref(`paymentRequests/${key}`).set({
+    ...pend,
+    razorpayPaymentId: payment.id,
+    razorpayOrderId: payment.order_id,
+    orderId: appOrderId,
+    status: "pending",
+    paymentMethod: "razorpay",
+    submittedAt: now,
+  });
+  await db.ref(`userPaymentRequests/${pend.userId}/${key}`).set({
+    status: "pending", amount: pend.amount, planId: pend.planId,
+    planName: pend.planName, orderId: appOrderId,
+    razorpayPaymentId: payment.id, submittedAt: now,
+  });
+  await db.ref("adminNotifications/payments").push({
+    type: "razorpay_payment", paymentId: key, orderId: appOrderId,
+    userId: pend.userId, userEmail: pend.userEmail, userName: pend.userName,
+    amount: pend.amount, planName: pend.planName, planId: pend.planId,
+    message: `Razorpay ₹${pend.amount} for ${pend.planName}. ID: ${payment.id}`,
+    status: "pending_verification", createdAt: now, read: false, actionRequired: true,
+  });
+  await db.ref(`notifications/${pend.userId}`).push({
+    title: "💳 Payment Received!",
+    message: `${pend.planName} plan (₹${pend.amount}) verify ho raha hai. 24 ghante mein activate ho jayega.`,
+    type: "payment", createdAt: now, read: false,
+  });
+  await db.ref(`pendingPayments/${appOrderId}/status`).set("paid");
+}
 app.post("/webhook/kronos", async (req, res) => {
   try {
     console.log("Kronos webhook payload:", JSON.stringify(req.body, null, 2));
@@ -164,8 +210,100 @@ app.post("/webhook/kronos", async (req, res) => {
 // warna neeche wale routes mein req.body undefined milega
 // ══════════════════════════════════════════
 app.use(express.json());
+// Subscription ke liye Razorpay order (platform account mein, koi transfer nahi)
+// ── Subscription pricing (SubscriptionPage jaisa hi rakho) ──
+const SUB_PLANS = {
+  starter:    { name: "Starter",     price: 299, dishes: 60, dishPrice: 5, hasAddons: true },
+  growth:     { name: "Growth",      price: 599, dishes: 90, dishPrice: 5 },
+  pro:        { name: "Pro",         price: 999, dishes: null },
+  stallBasic: { name: "Stall Basic", price: 99,  dishes: 30, dishPrice: 3 },
+  stallPlus:  { name: "Stall Plus",  price: 199, dishes: 45, dishPrice: 3 },
+  stallPro:   { name: "Stall Pro",   price: 299, dishes: 60, dishPrice: 3 },
+  stallMax:   { name: "Stall Max",   price: 399, dishes: 80, dishPrice: 3 },
+};
+
+const SUB_ADDONS = {
+  tableBooking: 100, customerFeedback: 100, adminCoupons: 100, waiterStats: 100,
+  deliveryBoys: 250, revenueDashboard: 250, expenses: 250, customers: 250,
+};
+
+function calcSubscriptionPrice({ planId, selectedAddons, extraDishCount, billingCycle }) {
+  const plan = SUB_PLANS[planId];
+  if (!plan) throw new Error("Invalid plan");
+
+  let monthly = plan.price;
+
+  let extra = parseInt(extraDishCount, 10) || 0;
+  if (extra < 0) extra = 0;
+  if (extra > 500) throw new Error("Too many extra dishes");
+  if (plan.dishPrice) monthly += extra * plan.dishPrice;
+  else extra = 0;
+
+  let addons = [];
+  if (plan.hasAddons) {
+    addons = [...new Set(Array.isArray(selectedAddons) ? selectedAddons : [])]
+      .filter((id) => SUB_ADDONS[id] !== undefined);
+    monthly += addons.reduce((s, id) => s + SUB_ADDONS[id], 0);
+  }
+
+  const yearly = billingCycle === "yearly";
+  const amount = yearly ? Math.round(monthly * 12 * 0.8) : monthly;
+  const maxDishes = plan.dishes === null ? "Unlimited" : plan.dishes + extra;
+
+  return { amount, plan, addons, extra, maxDishes, billingCycle: yearly ? "yearly" : "monthly" };
+}
+
+// Subscription ke liye Razorpay order
+app.post("/create-subscription-order", async (req, res) => {
+  try {
+    const token = (req.headers.authorization || "").replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "Login required" });
+    const decoded = await getAuth(firebaseApp).verifyIdToken(token);
+    const uid = decoded.uid;
+
+    const d = req.body;
+    let calc;
+    try {
+      calc = calcSubscriptionPrice(d);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    const appOrderId = `order_${Date.now()}_${uid}`;
+    const order = await razorpay.orders.create({
+      amount: calc.amount * 100,
+      currency: "INR",
+      receipt: appOrderId.slice(0, 40),
+      payment_capture: 1,
+      notes: { userId: uid, appOrderId, planId: d.planId },
+    });
+
+    await db.ref(`pendingPayments/${appOrderId}`).set({
+      userId: uid,
+      userEmail: decoded.email || "",
+      userName: decoded.name || "User",
+      planId: d.planId,
+      planName: calc.plan.name,
+      amount: calc.amount,
+      selectedAddons: calc.addons,
+      extraDishCount: calc.extra,
+      maxDishes: calc.maxDishes,
+      planFeatures: d.planFeatures || {},
+      billingCycle: calc.billingCycle,
+      razorpayOrderId: order.id,
+      status: "created",
+      createdAt: Date.now(),
+    });
+
+    res.json({ razorpayOrderId: order.id, orderId: appOrderId, amount: calc.amount });
+  } catch (e) {
+    console.error("Subscription order error:", e.error || e.message);
+    res.status(500).json({ error: e.error?.description || e.message });
+  }
+});
 const { registerEmbeddedSignupRoutes } = require("./Embeddedsignup");
 registerEmbeddedSignupRoutes(app, db, admin);
+registerStaffCheckinRoutes(app, db);
 // app.use(Settingstproutes(db));
 // ★ NEW: Multer setup — file uploads memory mein handle karega
 // ══════════════════════════════════════════
