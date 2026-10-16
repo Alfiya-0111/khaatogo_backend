@@ -1,5 +1,6 @@
 // whatsappOrderHandler.js
 const { buildCatalogEntries } = require("./catalogVariants");
+const { dishCategoryName } = require("./categoryUtils");
 const admin = require("firebase-admin");
 const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage } = require("./whatsappOrderBot");
 const { billSummaryText } = require("./billUtils");
@@ -118,7 +119,66 @@ async function sendCategoryList(db, phoneNumberId, from, restaurantId, page = 0)
     rows
   );
 }
+// Customer ne dish ka naam type kiya -> matching dishes ka product list bhejo
+// Return: match ki ginti (-1 = catalog hi nahi hai)
+function editDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
 
+// Exact match ya 1-2 akshar ki spelling galti wala match
+function matchesQuery(hay, words) {
+  const hayWords = hay.split(/[^a-z0-9]+/).filter(Boolean);
+  return words.every((w) => {
+    if (hay.includes(w)) return true;
+    const max = w.length >= 7 ? 2 : w.length >= 4 ? 1 : 0;
+    if (max === 0) return false;
+    return hayWords.some((h) => Math.abs(h.length - w.length) <= max && editDistance(h, w) <= max);
+  });
+}
+
+// Dish ka naam type kiya -> jin categories mein wo dish hai unki list bhejo
+// Return: kitni categories mili (0 = kuch nahi mila)
+async function sendSearchCategories(db, phoneNumberId, from, restaurantId, query) {
+  const groups = await loadMenuGroups(db, restaurantId);
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+
+  const rows = [];
+  for (const [key, g] of Object.entries(groups)) {
+    const matchedDishes = g.dishNames.filter((n) => matchesQuery(n.toLowerCase(), words));
+    const categoryMatches = matchesQuery(g.name.toLowerCase(), words);
+    if (matchedDishes.length === 0 && !categoryMatches) continue;
+
+    rows.push({
+      id: `cat:${key}`,
+      title: g.name.slice(0, 24),
+      description: namesPreview(matchedDishes.length ? matchedDishes : g.dishNames),
+    });
+    if (rows.length === 10) break; // WhatsApp list limit: max 10 rows
+  }
+
+  if (rows.length === 0) return 0;
+
+  await sendList(
+    phoneNumberId,
+    from,
+    `Results for "${query}"`.slice(0, 60),
+    "We found this dish in the categories below. Tap a category to see it.",
+    "View Categories",
+    rows
+  );
+  return rows.length;
+}
 async function sendCategoryProducts(db, phoneNumberId, from, restaurantId, categoryKey) {
   const catalogSnap = await db.ref(`restaurants/${restaurantId}/metaCatalog/catalogId`).once("value");
   const catalogId = catalogSnap.val();
@@ -169,7 +229,7 @@ async function sendMenuGreeting(db, phoneNumberId, from, restaurantId) {
   const res = await sendCatalogMessage(
     phoneNumberId,
     from,
-    `Welcome to ${restaurantName}! 👋\nTap View catalog to browse our menu by category, add items to your cart, and place your order.`,
+   `Welcome to ${restaurantName}! 👋\nTap View catalog to browse our menu, or just type a dish name (like "paneer") to search.`,
     thumbnail
   );
 
@@ -269,7 +329,8 @@ async function sendFullMenu(db, phoneNumberId, from, restaurantId) {
     return;
   }
 
-  await sendMenuGreeting(db, phoneNumberId, from, restaurantId);
+await sendMenuGreeting(db, phoneNumberId, from, restaurantId);
+  
 }
 
 // ★ Customer ka saved delivery address check karo
@@ -416,12 +477,26 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
     await sendFullMenuProducts(db, phoneNumberId, from, restaurantId);
     return;
   }
-  if (message.type === "text") {
+   if (message.type === "text") {
     const snap = await sessionRef.once("value");
     const session = snap.val();
     const isMidFlow = session && MID_FLOW_STATES.includes(session.state);
 
     if (!isMidFlow) {
+      const q = (message.text.body || "").trim();
+      const isGreeting = /^(hi+|hii+|hello+|helo|hey+|hlo|menu|start|namaste|namaskar|order)$/i.test(q);
+
+      // Fallback message wale restaurants (bot abhi band) mein search mat chalao
+      const fbSnap = await db.ref(`restaurants/${restaurantId}/whatsapp/fallbackMessage`).once("value");
+      const hasFallback = !!fbSnap.val();
+
+    if (!hasFallback && q.length >= 3 && !isGreeting) {
+  const found = await sendSearchCategories(db, phoneNumberId, from, restaurantId, q);
+  if (found > 0) return;
+  await sendText(phoneNumberId, from, `Sorry, we couldn't find "${q}" on our menu. Please pick from our categories:`);
+  await sendCategoryList(db, phoneNumberId, from, restaurantId);
+  return;
+}
       await sendFullMenu(db, phoneNumberId, from, restaurantId);
       return;
     }
@@ -665,7 +740,7 @@ for (const it of rawItems) {
           billSummaryText(session.items, session.subtotal, result.discount, result.code)
         );
       }
-      await sendButtons(phoneNumberId, from, "Order kaise chahiye?", [
+      await sendButtons(phoneNumberId, from, "How would you like your order", [
         { id: "type_dinein", title: "Dine-in" },
         { id: "type_delivery", title: "Delivery" },
         { id: "type_takeaway", title: "Takeaway" },
