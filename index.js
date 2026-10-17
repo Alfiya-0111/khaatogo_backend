@@ -27,6 +27,8 @@ const firebaseApp = initializeApp({
 const db = getDatabase(firebaseApp);
 setupAbsentJob(db);
 setupCatalogSync(db);
+const { bookDelivery, applyDeliveryStatus } = require("./deliveryService");
+const deliveryProviders = require("./providers");
 require("./whatsappOrderBot").setDb(db);
 // ── Razorpay init ──
 const razorpay = new Razorpay({
@@ -68,25 +70,30 @@ app.post(
 
       const event = JSON.parse(req.body.toString());
 
-      // 1) Payment successful hone par order confirm karo
-    if (event.event === "payment.captured") {
-  const payment = event.payload.payment.entity;
-  const { restaurantId, orderId, appOrderId } = payment.notes || {};
+          // 1) Payment successful hone par order confirm karo
+      if (event.event === "payment.captured") {
+        const payment = event.payload.payment.entity;
+        const { restaurantId, orderId, appOrderId } = payment.notes || {};
 
-  if (appOrderId) {
-    // Khaatogo subscription payment
-    await handleSubscriptionPayment(payment, appOrderId);
-  } else if (restaurantId && orderId) {
-    // restaurant ka customer order (pehle jaisa)
-    await db.ref(`orders/${restaurantId}/${orderId}`).update({
-      paymentStatus: "paid_online",
-      status: "confirmed",
-      razorpayPaymentId: payment.id,
-      paidAt: Date.now(),
-    });
-    console.log(`✅ Payment confirmed for order ${orderId}`);
-  }
-}
+        if (appOrderId) {
+          // Khaatogo subscription payment
+          await handleSubscriptionPayment(payment, appOrderId);
+        } else if (restaurantId && orderId) {
+          // restaurant ka customer order
+          await db.ref(`orders/${restaurantId}/${orderId}`).update({
+            paymentStatus: "paid_online",
+            status: "confirmed",
+            razorpayPaymentId: payment.id,
+            paidAt: Date.now(),
+          });
+          console.log(`✅ Payment confirmed for order ${orderId}`);
+
+          // delivery book karo (sirf customer order ke liye, subscription ke liye nahi)
+          bookDelivery(db, restaurantId, orderId).catch((e) =>
+            console.error("Delivery booking error:", e.message)
+          );
+        }
+      }
 
       if (event.event === "payment.failed") {
         const payment = event.payload.payment.entity;
@@ -105,7 +112,11 @@ app.post(
         if (restaurantId && orderId) {
           const updates = { status: "confirmed", paymentStatus: "paid_online", paidAt: Date.now() };
           await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update(updates);
+
           await db.ref(`orders/${restaurantId}/${orderId}`).update(updates);
+                    bookDelivery(db, restaurantId, orderId).catch((e) =>
+            console.error("Delivery booking error:", e.message)
+          );
         }
       }
 if (event.event === "qr_code.credited") {
@@ -121,7 +132,9 @@ if (event.event === "qr_code.credited") {
       status: "confirmed", paymentStatus: "paid_online",
       razorpayPaymentId: payment.id, paidAt: Date.now(),
     });
-
+    bookDelivery(db, restaurantId, orderId).catch((e) =>
+      console.error("Delivery booking error:", e.message)
+    );
     // restaurant ko uska share transfer karo (Route)
     try {
       const restSnap = await db.ref(`restaurants/${restaurantId}/payment`).once("value");
@@ -205,11 +218,47 @@ app.post("/webhook/kronos", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// Delivery provider (Porter/Rapido) ke status updates
+app.post("/webhook/delivery/:provider", express.raw({ type: "*/*" }), async (req, res) => {
+  const provider = deliveryProviders.get(req.params.provider);
+  if (!provider) return res.sendStatus(404);
+  try {
+    const evt = provider.parseWebhook({ rawBody: req.body, headers: req.headers });
+    await applyDeliveryStatus(db, provider.name, evt.providerOrderId, evt.status, evt.extra || {});
+    res.json({ status: "ok" });
+  } catch (e) {
+    if (e.code === "NOT_READY") return res.sendStatus(501);
+    if (e.code === "BAD_SIGNATURE") return res.sendStatus(401);
+    console.error("Delivery webhook error:", e.message);
+    res.status(500).send("Webhook processing failed");
+  }
+});
 // ══════════════════════════════════════════
 // ★ FIX: JSON parser yahan, saare baaki routes ke UPAR — 
 // warna neeche wale routes mein req.body undefined milega
 // ══════════════════════════════════════════
 app.use(express.json());
+// Restaurant owner failed / needs_location delivery ko dobara try kare
+app.post("/book-delivery", async (req, res) => {
+  try {
+    const token = (req.headers.authorization || "").replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "Login required" });
+    const decoded = await getAuth(firebaseApp).verifyIdToken(token);
+
+    const { restaurantId, orderId } = req.body;
+    if (!restaurantId || !orderId) return res.status(400).json({ error: "restaurantId aur orderId required" });
+
+    const ownerSnap = await db.ref(`restaurants/${restaurantId}/ownerId`).once("value");
+    const ownerId = ownerSnap.val() || restaurantId;
+    if (decoded.uid !== ownerId) return res.status(403).json({ error: "Not allowed" });
+
+    const result = await bookDelivery(db, restaurantId, orderId, { force: true });
+    res.json(result);
+  } catch (e) {
+    console.error("Book delivery error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 // Subscription ke liye Razorpay order (platform account mein, koi transfer nahi)
 // ── Subscription pricing (SubscriptionPage jaisa hi rakho) ──
 const SUB_PLANS = {

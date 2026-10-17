@@ -130,6 +130,18 @@ function sendCatalogMessage(phoneNumberId, to, bodyText, thumbnailRetailerId) {
     },
   });
 }
+// Customer se location pin maangne wala native WhatsApp button
+function sendLocationRequest(phoneNumberId, to, bodyText) {
+  return sendWhatsAppMessage(phoneNumberId, {
+    to,
+    type: "interactive",
+    interactive: {
+      type: "location_request_message",
+      body: { text: bodyText },
+      action: { name: "send_location" },
+    },
+  });
+}
 // ★ NEW — WhatsApp Flow open karne wala interactive message
 function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, screen, screenData) {
   return sendWhatsAppMessage(phoneNumberId, {
@@ -155,4 +167,4 @@ function sendFlowMessage(phoneNumberId, to, flowToken, headerText, bodyText, scr
   });
 }
 
-module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage, setDb };
+module.exports = { sendText, sendButtons, sendImage, sendWhatsAppMessage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage, sendLocationRequest, setDb };

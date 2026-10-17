@@ -2,7 +2,8 @@
 const { buildCatalogEntries } = require("./catalogVariants");
 const { dishCategoryName } = require("./categoryUtils");
 const admin = require("firebase-admin");
-const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage } = require("./whatsappOrderBot");
+const { sendText, sendButtons, sendImage, sendProductList, sendFlowMessage, sendList, sendCatalogMessage, sendLocationRequest } = require("./whatsappOrderBot");
+const deliveryProviders = require("./providers");
 const { billSummaryText } = require("./billUtils");
 
 const { getFirestore } = require("firebase-admin/firestore");
@@ -346,7 +347,59 @@ async function saveCustomerAddress(db, restaurantId, phone, address) {
     updatedAt: Date.now(),
   });
 }
+// ★ Customer ki saved location (lat/lng)
+async function getSavedLocation(db, restaurantId, phone) {
+  const snap = await db.ref(`customerProfiles/${restaurantId}/${phone}/location`).once("value");
+  const loc = snap.val();
+  const lat = Number(loc?.lat);
+  const lng = Number(loc?.lng);
+  return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+}
 
+async function saveCustomerLocation(db, restaurantId, phone, location) {
+  await db.ref(`customerProfiles/${restaurantId}/${phone}`).update({
+    location,
+    updatedAt: Date.now(),
+  });
+}
+
+// ★ Kya is restaurant ke delivery orders Khaatogo delivery se jayenge?
+// Teeno cheezein chahiye: toggle ON, bank account activated, aur koi provider ready.
+// Testing ke liye Railway env DELIVERY_TEST_MODE=true se provider wali shart skip hoti hai
+// (production mein ye env set mat rakhna).
+async function useKhaatogoDelivery(db, restaurantId) {
+  const [enabledSnap, bankSnap] = await Promise.all([
+    db.ref(`restaurants/${restaurantId}/settings/khaatogoDelivery`).once("value"),
+    db.ref(`restaurants/${restaurantId}/payment/razorpayAccountStatus`).once("value"),
+  ]);
+  if (enabledSnap.val() !== true) return false;
+  if (bankSnap.val() !== "activated") return false;
+  if (process.env.DELIVERY_TEST_MODE === "true") return true;
+  return deliveryProviders.ready().length > 0;
+}
+
+async function askLocation(phoneNumberId, from, sessionRef) {
+  await sessionRef.update({ state: "awaiting_location" });
+  await sendLocationRequest(
+    phoneNumberId,
+    from,
+        " Please share your exact delivery location so our rider can find you. Tap the button below."
+  );
+}
+
+// Address mil jaane ke baad: Khaatogo delivery ho to location maango, warna seedha confirm
+async function continueAfterAddress(db, phoneNumberId, from, restaurantId, sessionRef, { reuseLocation = false } = {}) {
+  if (await useKhaatogoDelivery(db, restaurantId)) {
+    const saved = reuseLocation ? await getSavedLocation(db, restaurantId, from) : null;
+    if (!saved) {
+      await askLocation(phoneNumberId, from, sessionRef);
+      return;
+    }
+    await sessionRef.update({ location: saved });
+  }
+  await sessionRef.update({ state: "awaiting_confirm" });
+  await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
+}
 // ── Coupon logic ──
 async function applyCoupon(db, restaurantId, code, subtotal) {
   const snap = await db.ref(`coupons/${restaurantId}`).once("value");
@@ -451,6 +504,7 @@ const MID_FLOW_STATES = [
   "awaiting_coupon_choice", "awaiting_customize_choice",
   "collecting_prefs", "awaiting_spice", "awaiting_salt",
   "awaiting_sweet", "awaiting_salad",
+    "awaiting_location",
   "awaiting_note_gate", "collecting_notes", "awaiting_note_text",
 ];
 
@@ -501,7 +555,28 @@ async function handleIncomingMessage(db, razorpay, message, phoneNumberId, resta
       return;
     }
   }
+  // ══════════════════════════════════════════
+  // Customer ne location pin bheja (delivery ke liye)
+  // ══════════════════════════════════════════
+  if (message.type === "location") {
+    const snap = await sessionRef.once("value");
+    const session = snap.val();
+    if (!session || session.state !== "awaiting_location") return;
 
+    const lat = Number(message.location?.latitude);
+    const lng = Number(message.location?.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      await sendText(phoneNumberId, from, "Sorry, we couldn't read that location. Please try again.");
+      await askLocation(phoneNumberId, from, sessionRef);
+      return;
+    }
+
+    const location = { lat, lng };
+    await sessionRef.update({ location, state: "awaiting_confirm" });
+    await saveCustomerLocation(db, restaurantId, from, location);
+    await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
+    return;
+  }
   // ══════════════════════════════════════════
   // 1) Customer ne cart order bheja
   // ══════════════════════════════════════════
@@ -566,6 +641,7 @@ for (const it of rawItems) {
     if (!session) return;
 
        if (responseJson.trigger === "confirm_order") {
+              let reuseLocation = false;
       // ★ Delivery ho to address handle karo
       if (session.orderType === "delivery") {
         const flowAddress = (session.address || "").trim();
@@ -577,9 +653,11 @@ for (const it of rawItems) {
           // flow mein khaali chhoda -> purana saved address lo
           const savedAddress = await getSavedAddress(db, restaurantId, from);
 
-          if (savedAddress) {
+                  if (savedAddress) {
             await sessionRef.update({ address: savedAddress });
             await sendText(phoneNumberId, from, `📍 Using your saved address:\n${savedAddress}`);
+            reuseLocation = true;
+          
           } else {
             // saved bhi nahi hai -> chat mein maang lo
             await sessionRef.update({ state: "awaiting_address" });
@@ -587,6 +665,11 @@ for (const it of rawItems) {
             return;
           }
         }
+      }
+
+           if (session.orderType === "delivery") {
+        await continueAfterAddress(db, phoneNumberId, from, restaurantId, sessionRef, { reuseLocation });
+        return;
       }
 
       await sessionRef.update({ state: "awaiting_confirm" });
@@ -661,17 +744,14 @@ for (const it of rawItems) {
       await sendText(phoneNumberId, from, "Please send your table number (type 'skip' if you don't know):");
       return;
     }
-    if (buttonId === "type_delivery") {
+      if (buttonId === "type_delivery") {
       const savedAddress = await getSavedAddress(db, restaurantId, from);
 
       if (savedAddress) {
-        await sessionRef.update({ state: "awaiting_confirm", orderType: "delivery", address: savedAddress });
-        await sendText(
-          phoneNumberId,
-          from,
-         `📍 Using your saved address:\n${savedAddress}`
-        );
-        await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
+
+        await sessionRef.update({ orderType: "delivery", address: savedAddress });
+        await sendText(phoneNumberId, from, `📍 Using your saved address:\n${savedAddress}`);
+        await continueAfterAddress(db, phoneNumberId, from, restaurantId, sessionRef, { reuseLocation: true });
       } else {
         await sessionRef.update({ state: "awaiting_address", orderType: "delivery" });
         await sendText(phoneNumberId, from, "📍 Please type your full delivery address in a single message:");
@@ -684,7 +764,17 @@ for (const it of rawItems) {
       return;
     }
 
-    if (buttonId === "confirm_order") {
+       if (buttonId === "confirm_order") {
+      // Khaatogo delivery: COD nahi chalta, seedha Razorpay QR
+      if (session.orderType === "delivery" && (await useKhaatogoDelivery(db, restaurantId))) {
+        if (!session.location) {
+          await askLocation(phoneNumberId, from, sessionRef);
+          return;
+        }
+        await finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, session, "razorpay");
+        return;
+      }
+
       await sessionRef.update({ state: "awaiting_payment_method" });
       await sendButtons(phoneNumberId, from, "How would you like to pay?", [
         { id: "pay_upi", title: "Pay via UPI" },
@@ -758,11 +848,17 @@ for (const it of rawItems) {
       return;
     }
 
+      if (session.state === "awaiting_location") {
+      await sendText(phoneNumberId, from, "We need your exact location for delivery.");
+      await askLocation(phoneNumberId, from, sessionRef);
+      return;
+    }
+
     if (session.state === "awaiting_address") {
       const address = message.text.body.trim();
-      await sessionRef.update({ state: "awaiting_confirm", address });
+      await sessionRef.update({ address });
       await saveCustomerAddress(db, restaurantId, from, address);
-      await sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef);
+      await continueAfterAddress(db, phoneNumberId, from, restaurantId, sessionRef, { reuseLocation: false });
       return;
     }
   }
@@ -813,7 +909,30 @@ async function sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef
 async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, session, paymentMethod) {
   const orderId = session.orderId;
   const total = session.subtotal - (session.discount || 0);
-
+  // Khaatogo delivery: Razorpay QR (restaurant ke bank mein split webhook handle karta hai)
+  let qr = null;
+  if (paymentMethod === "razorpay") {
+    try {
+      qr = await razorpay.qrCode.create({
+        type: "upi_qr",
+        name: `Order ${orderId}`.slice(0, 40),
+        usage: "single_use",
+        fixed_amount: true,
+        payment_amount: Math.round(total * 100),
+        description: `Order ${orderId}`,
+        close_by: Math.floor(Date.now() / 1000) + 30 * 60, // 30 minute valid
+        notes: { restaurantId, orderId },
+      });
+    } catch (e) {
+      console.error("Razorpay QR create failed:", e.error || e.message);
+      await sendText(phoneNumberId, from, "Sorry, we couldn't generate the payment QR right now. Please try again.");
+      await sendButtons(phoneNumberId, from, "Would you like to try again?", [
+        { id: "confirm_order", title: "Try Again" },
+        { id: "cancel_order", title: "Cancel Order" },
+      ]);
+      return;
+    }
+  }
   const orderItems = session.items.map((it) => ({
     dishId: it.dishId,
     name: it.name,
@@ -842,6 +961,8 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     orderType: session.orderType,
     tableNumber: session.tableNumber || null,
     address: session.address || null,
+        deliveryLocation: session.location || null,
+    razorpayQrId: qr?.id || null,
     paymentMethod,
     status: paymentMethod === "cod" ? "confirmed" : "awaiting_payment",
     paymentStatus: paymentMethod === "cod" ? "pending_cod" : "pending",
@@ -861,7 +982,15 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     ? Math.max(...orderItems.map((i) => i.prepTime || 15))
     : 15;
   const readyLine = `\n⏱️ Your order will be ready in about ${maxPrepTime} minutes.`;
-
+  if (paymentMethod === "razorpay") {
+    await sendImage(
+      phoneNumberId,
+      from,
+      qr.image_url,
+      `💳 Scan the QR code to pay ₹${total.toFixed(2)} (valid for 30 minutes)\nOrder ID: ${orderId}\n\nYour order will be confirmed and sent for delivery once the payment is received.`
+    );
+    return;
+  }
   if (paymentMethod === "cod") {
     await sendText(
       phoneNumberId,
