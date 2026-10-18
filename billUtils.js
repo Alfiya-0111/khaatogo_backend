@@ -1,5 +1,5 @@
 // billUtils.js
-function billSummaryText(lines, subtotal, discount, couponCode) {
+function billSummaryText(lines, subtotal, discount, couponCode, deliveryCharge = 0) {
   const itemsText = lines.map((l) => {
     let line = `${l.qty} x ${l.name} = ₹${l.lineTotal.toFixed(2)}`;
     const tags = [];
@@ -11,9 +11,11 @@ function billSummaryText(lines, subtotal, discount, couponCode) {
     if (l.specialInstructions) line += `\n   📝 ${l.specialInstructions}`;
     return line;
   }).join("\n");
+  const delivery = Number(deliveryCharge) || 0;
   let text = `🧾Your order:\n${itemsText}\n\nSubtotal: ₹${subtotal.toFixed(2)}`;
   if (discount > 0) text += `\n🏷️ Coupon (${couponCode}): −₹${discount.toFixed(2)}`;
-  text += `\n\n*Total: ₹${(subtotal - discount).toFixed(2)}*`;
+  if (delivery > 0) text += `\n🛵 Delivery charge: ₹${delivery.toFixed(2)}`;
+  text += `\n\n*Total: ₹${(subtotal - discount + delivery).toFixed(2)}*`;
   return text;
 }
 module.exports = { billSummaryText };

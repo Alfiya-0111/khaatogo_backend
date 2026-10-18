@@ -368,14 +368,18 @@ async function saveCustomerLocation(db, restaurantId, phone, location) {
 // Testing ke liye Railway env DELIVERY_TEST_MODE=true se provider wali shart skip hoti hai
 // (production mein ye env set mat rakhna).
 async function useKhaatogoDelivery(db, restaurantId) {
-  const [enabledSnap, bankSnap] = await Promise.all([
+  const [enabledSnap, modeSnap, bankSnap, upiSnap] = await Promise.all([
     db.ref(`restaurants/${restaurantId}/settings/khaatogoDelivery`).once("value"),
+    db.ref(`restaurants/${restaurantId}/settings/deliveryPayMode`).once("value"),
     db.ref(`restaurants/${restaurantId}/payment/razorpayAccountStatus`).once("value"),
+    db.ref(`restaurants/${restaurantId}/payment/upiId`).once("value"),
   ]);
-  if (enabledSnap.val() !== true) return false;
-  if (bankSnap.val() !== "activated") return false;
-  if (process.env.DELIVERY_TEST_MODE === "true") return true;
-  return deliveryProviders.ready().length > 0;
+  if (enabledSnap.val() !== true) return null;
+  const mode = modeSnap.val() === "own_upi" ? "own_upi" : "razorpay";
+  if (mode === "razorpay" && bankSnap.val() !== "activated") return null;
+  if (mode === "own_upi" && !upiSnap.val()) return null;
+  if (process.env.DELIVERY_TEST_MODE !== "true" && deliveryProviders.ready().length === 0) return null;
+  return mode;
 }
 
 async function askLocation(phoneNumberId, from, sessionRef) {
@@ -764,14 +768,14 @@ for (const it of rawItems) {
       return;
     }
 
-       if (buttonId === "confirm_order") {
-      // Khaatogo delivery: COD nahi chalta, seedha Razorpay QR
-      if (session.orderType === "delivery" && (await useKhaatogoDelivery(db, restaurantId))) {
+        if (buttonId === "confirm_order") {
+      const kMode = session.orderType === "delivery" ? await useKhaatogoDelivery(db, restaurantId) : null;
+      if (kMode) {
         if (!session.location) {
           await askLocation(phoneNumberId, from, sessionRef);
           return;
         }
-        await finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, session, "razorpay");
+        await finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, session, kMode === "razorpay" ? "razorpay" : "online");
         return;
       }
 
@@ -891,15 +895,33 @@ async function proceedToOrderTypeOrCoupon(db, phoneNumberId, from, restaurantId,
     ]);
   }
 }
-
+async function calcDeliveryCharge(db, restaurantId, amount) {
+  const [feeSnap, freeSnap] = await Promise.all([
+    db.ref(`restaurants/${restaurantId}/settings/deliveryFee`).once("value"),
+    db.ref(`restaurants/${restaurantId}/settings/freeDeliveryAbove`).once("value"),
+  ]);
+  const fee = Number(feeSnap.val()) || 0;
+  const freeAbove = Number(freeSnap.val()) || 0;
+  if (fee <= 0) return 0;
+  if (freeAbove > 0 && amount >= freeAbove) return 0;
+  return fee;
+}
 async function sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef) {
   const snap = await sessionRef.once("value");
   const session = snap.val();
+
+  let deliveryCharge = 0;
+  if (session.orderType === "delivery" && (await useKhaatogoDelivery(db, restaurantId))) {
+    deliveryCharge = await calcDeliveryCharge(db, restaurantId, session.subtotal - (session.discount || 0));
+  }
+  await sessionRef.update({ deliveryCharge });
+
   await sendText(
     phoneNumberId,
     from,
-    billSummaryText(session.items, session.subtotal, session.discount || 0, session.couponCode)
+    billSummaryText(session.items, session.subtotal, session.discount || 0, session.couponCode, deliveryCharge)
   );
+
   await sendButtons(phoneNumberId, from, "Would you like to confirm your order?", [
     { id: "confirm_order", title: "Confirm Order" },
     { id: "cancel_order", title: "Cancel Order" },
@@ -908,7 +930,8 @@ async function sendConfirmStep(db, phoneNumberId, from, restaurantId, sessionRef
 
 async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, session, paymentMethod) {
   const orderId = session.orderId;
-  const total = session.subtotal - (session.discount || 0);
+  const deliveryCharge = Number(session.deliveryCharge) || 0;
+const total = session.subtotal - (session.discount || 0) + deliveryCharge;
   // Khaatogo delivery: Razorpay QR (restaurant ke bank mein split webhook handle karta hai)
   let qr = null;
   if (paymentMethod === "razorpay") {
@@ -957,6 +980,7 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     discount: session.discount || 0,
     couponCode: session.couponCode || null,
     total,
+        deliveryCharge,
         customerNote: session.note || null,
     orderType: session.orderType,
     tableNumber: session.tableNumber || null,
@@ -1022,7 +1046,7 @@ async function finalizeOrder(db, razorpay, restaurantId, from, phoneNumberId, se
     phoneNumberId,
     from,
     qrImageUrl,
-    `💳 Scan the QR code to pay ₹${total.toFixed(2)}\nOrder ID: ${orderId}${readyLine}`
+       `💳 Scan the QR code to pay ₹${total.toFixed(2)}\nOrder ID: ${orderId}${session.orderType === "delivery" ? "\n\nThe restaurant will confirm your payment and your order will be sent for delivery." : readyLine}`
   );
 }
 

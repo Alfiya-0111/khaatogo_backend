@@ -259,6 +259,42 @@ app.post("/book-delivery", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// Owner apni UPI ka payment manually confirm kare -> delivery book
+app.post("/confirm-manual-payment", async (req, res) => {
+  try {
+    const token = (req.headers.authorization || "").replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "Login required" });
+    const decoded = await getAuth(firebaseApp).verifyIdToken(token);
+
+    const { restaurantId, orderId } = req.body;
+    if (!restaurantId || !orderId) return res.status(400).json({ error: "restaurantId aur orderId required" });
+
+    const ownerSnap = await db.ref(`restaurants/${restaurantId}/ownerId`).once("value");
+    if (decoded.uid !== (ownerSnap.val() || restaurantId)) return res.status(403).json({ error: "Not allowed" });
+
+    const order = (await db.ref(`orders/${restaurantId}/${orderId}`).once("value")).val();
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.paymentStatus === "paid_online") return res.json({ status: "already_paid" });
+    if (order.source !== "whatsapp" || order.paymentMethod !== "online") {
+      return res.status(400).json({ error: "Ye order manual confirm nahi ho sakta" });
+    }
+
+    const updates = {
+      status: "confirmed", paymentStatus: "paid_online",
+      paymentConfirmedBy: "owner", paidAt: Date.now(),
+    };
+    await db.ref(`orders/${restaurantId}/${orderId}`).update(updates);
+    await db.ref(`whatsappOrders/${restaurantId}/${orderId}`).update(updates);
+
+    const delivery = order.orderType === "delivery"
+      ? await bookDelivery(db, restaurantId, orderId)
+      : null;
+    res.json({ status: "confirmed", delivery });
+  } catch (e) {
+    console.error("Confirm manual payment error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 // Subscription ke liye Razorpay order (platform account mein, koi transfer nahi)
 // ── Subscription pricing (SubscriptionPage jaisa hi rakho) ──
 const SUB_PLANS = {
