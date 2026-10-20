@@ -507,7 +507,37 @@ async function decrementStockForOrder(db, restaurantId, items) {
 
 // dish ke taste profile ke hisaab se decide karo kaunse customization steps chahiye
 
+// ★ Subscription chalu hai ya expire ho gaya?
+// Subscription record nahi hai to purane behavior jaisa (chalu maano).
+// expiresAt null ho (special users) to kabhi expire nahi.
+async function isSubscriptionActive(db, restaurantId) {
+  try {
+    const snap = await db.ref(`subscriptions/${restaurantId}`).once("value");
+    const sub = snap.val();
+    if (!sub) return true;
+    if (sub.expiresAt && Number(sub.expiresAt) < Date.now()) return false;
+    return true;
+  } catch (e) {
+    console.error("Subscription check failed:", e.message);
+    return true; // DB error aaye to customers ko block mat karo
+  }
+}
 
+const EXPIRED_NOTICE_COOLDOWN_MS = 60 * 60 * 1000; // 1 ghanta
+
+// Expire hone par customer ko batao, par baar baar spam na ho
+async function notifyOrdersPaused(db, phoneNumberId, from, restaurantId) {
+  const seenRef = db.ref(`whatsappExpiredNoticeSeen/${restaurantId}/${from}`);
+  const lastSent = (await seenRef.once("value")).val() || 0;
+  if (Date.now() - lastSent < EXPIRED_NOTICE_COOLDOWN_MS) return;
+
+  await sendText(
+    phoneNumberId,
+    from,
+    "Sorry, this restaurant is not accepting orders on WhatsApp right now. Please contact the restaurant directly."
+  );
+  await seenRef.set(Date.now());
+}
 const MID_FLOW_STATES = [
    "in_flow",
   "awaiting_coupon_code", "awaiting_table", "awaiting_address",
@@ -522,6 +552,11 @@ const MID_FLOW_STATES = [
 async function handleIncomingMessage(db, razorpay, message, phoneNumberId, restaurantId) {
   const from = message.from;
   const sessionRef = db.ref(`whatsappSessions/${restaurantId}/${from}`);
+   if (!(await isSubscriptionActive(db, restaurantId))) {
+    if (message.type === "order") await sessionRef.remove().catch(() => {});
+    await notifyOrdersPaused(db, phoneNumberId, from, restaurantId);
+    return;
+  }
   // ── Category browsing (session ki zaroorat nahi) ──
   if (message.type === "interactive" && message.interactive?.type === "list_reply") {
     const id = message.interactive.list_reply.id || "";
